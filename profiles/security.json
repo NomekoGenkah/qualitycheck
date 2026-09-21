@@ -1,0 +1,35 @@
+{
+  "$schema": "https://qualitycheck.dev/schema/profile-v1.json",
+  "name": "security",
+  "description": "Security posture, secrets, vulnerabilities, and input sanitization",
+  "fail_below": 3.5,
+  "metrics": [
+    {
+      "id": "hardcoded_secrets",
+      "type": "binary",
+      "question": "Does the file contain hardcoded secrets, credentials, tokens, or keys?",
+      "weight": 2.0
+    },
+    {
+      "id": "input_validation",
+      "type": "enum",
+      "options": ["poor", "fair", "good", "high"],
+      "question": "How robust is input validation and boundary checking?",
+      "weight": 1.5
+    },
+    {
+      "id": "injection_risk",
+      "type": "enum",
+      "options": ["none", "low", "medium", "high"],
+      "question": "What is the perceived risk of injection attacks (SQL, command, XSS, path traversal)?",
+      "weight": 1.5
+    },
+    {
+      "id": "safe_error_handling",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Does error handling avoid leaking sensitive internal details or stack traces?",
+      "weight": 1.0
+    }
+  ]
+}

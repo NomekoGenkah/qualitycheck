@@ -1,1 +1,170 @@
 # qualitycheck
+
+A Rust CLI that uses the **Jev** API (TypeSafe AI) to score code quality in a quantifiable, configurable way — think "eslint, but for qualitative criteria" (naming, cohesion, security posture, etc.) that a traditional linter cannot evaluate.
+
+Designed to be run by humans directly, in CI pipelines, or invoked by coding agents (Claude Code, Codex, Cursor, etc.) as a fast, deterministic shell tool.
+
+---
+
+## Key Features
+
+- **Deterministic Aggregation**: Jev returns raw typed metric values (`scale`, `enum`, `binary`) with calibrated confidence. All aggregation (weighted averages, threshold comparisons, and gating decisions) is calculated deterministically in Rust.
+- **Library-First Architecture**: Core modules (`profile`, `walker`, `git`, `cache`, `jev_client`, `scorer`, `output`, `config`) have no dependency on CLI frontends.
+- **Content-Addressed Caching**: Powered by `blake3(file_content) + blake3(active_metric_definitions)`. Re-scans cost zero API calls and zero latency for unchanged files. Editing a metric automatically invalidates stale results without manual intervention.
+- **Git-Aware Scans (`patch`)**: Scores files modified versus working tree or upstream base branch.
+- **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
+- **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
+
+---
+
+## Installation & Setup
+
+```bash
+cargo build --release
+cp target/release/qualitycheck /usr/local/bin/ # or place in your PATH
+```
+
+### First-Time Initialization
+
+```bash
+# Interactive setup: prompts for Jev API key, installs profiles, adds .qualitycheck/ to .gitignore
+qualitycheck init
+
+# Non-interactive / CI / Agent setup:
+qualitycheck init --api-key <YOUR_JEV_API_KEY> --non-interactive
+# Or export JEV_API_KEY:
+export JEV_API_KEY="your-api-key"
+```
+
+---
+
+## CLI Usage
+
+### 1. Scanning Code
+
+```bash
+# Scan current directory with default "quality" profile
+qualitycheck scan .
+
+# Scan with multiple profiles combined
+qualitycheck scan ./src --profile quality,security --format table
+
+# Output structured JSON for automation or agents
+qualitycheck scan ./src --profile quality,security --format json
+
+# Strict gating: exit code 1 if any file falls below profile fail_below threshold
+qualitycheck scan ./src --strict
+```
+
+### 2. Git Patch Scans
+
+```bash
+# Scan uncommitted changes in the working tree
+qualitycheck patch
+
+# Scan changes relative to base branch (e.g. main)
+qualitycheck patch --base main --strict --format json
+```
+
+### 3. Triage & History
+
+```bash
+# Gaps triage: view files/metrics that failed their threshold in the latest run
+qualitycheck gaps
+
+# Detailed metric breakdown for a specific file
+qualitycheck file src/auth.rs
+
+# Compare two saved runs to audit improvements and regressions
+qualitycheck diff <run-id-1> <run-id-2>
+
+# List all saved runs
+qualitycheck runs list
+```
+
+### 4. Profiles & Agent Introspection
+
+```bash
+# List available profiles (built-in and ~/.config/qualitycheck/profiles/)
+qualitycheck profiles list
+
+# Show raw JSON definition of a profile
+qualitycheck profiles show security
+
+# Machine-readable JSON manifest of commands and profiles
+qualitycheck describe
+```
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success — informational scan, or `--strict` passed with all files meeting thresholds |
+| `1` | Strict failure — `--strict` was passed and at least one score fell below `fail_below` |
+| `2` | Error — usage error, configuration/API key missing, or malformed profile |
+
+---
+
+## Profiles Data Model
+
+Profiles are stored in JSON (built into binary and copied to `~/.config/qualitycheck/profiles/`):
+
+```json
+{
+  "$schema": "https://qualitycheck.dev/schema/profile-v1.json",
+  "name": "quality",
+  "description": "Overall code readability, maintainability, and structure",
+  "fail_below": 3.0,
+  "metrics": [
+    {
+      "id": "naming_clarity",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Do variable and function names communicate their purpose clearly?",
+      "weight": 1.0
+    },
+    {
+      "id": "has_dead_code",
+      "type": "binary",
+      "question": "Does the file contain dead, commented-out, or unreachable code?",
+      "weight": 0.5
+    },
+    {
+      "id": "complexity_level",
+      "type": "enum",
+      "options": ["low", "medium", "high", "critical"],
+      "question": "What is the perceived cyclomatic complexity level of the file?",
+      "weight": 1.5
+    }
+  ]
+}
+```
+
+---
+
+## Architecture
+
+```
+qualitycheck/
+├── Cargo.toml
+├── profiles/          # Default profiles (qa.json, security.json, quality.json)
+├── src/
+│   ├── lib.rs         # Library root
+│   ├── main.rs        # Entry point and command routing
+│   ├── cli.rs         # Clap command structures
+│   ├── config.rs      # ~/.config/qualitycheck/config.toml and API key resolution
+│   ├── profile.rs     # Profile data structures, JSON schema validation, metric hashing
+│   ├── walker.rs      # Directory walking respecting .gitignore, globs, and size limits
+│   ├── git.rs         # Git changed files detection for patch command
+│   ├── cache.rs       # Blake3 content-addressed cache (.qualitycheck/cache/)
+│   ├── jev_client.rs  # Async batch client for TypeSafe AI Jev API
+│   ├── scorer.rs      # Metric score normalization and weighted composite aggregation
+│   ├── output.rs      # Table/JSON display, report persistence, triage & diffing
+│   └── error.rs       # Typed errors (thiserror) with exit codes
+└── tests/
+    ├── scorer_tests.rs
+    ├── cache_tests.rs
+    └── cli_integration_tests.rs
+```

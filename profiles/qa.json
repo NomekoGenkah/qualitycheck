@@ -1,0 +1,35 @@
+{
+  "$schema": "https://qualitycheck.dev/schema/profile-v1.json",
+  "name": "qa",
+  "description": "Testability, edge cases, error handling, and reliability",
+  "fail_below": 3.0,
+  "metrics": [
+    {
+      "id": "testability",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Is the code modular, loosely coupled, and easy to unit test?",
+      "weight": 1.5
+    },
+    {
+      "id": "edge_case_handling",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Are potential edge cases, boundaries, and empty/null states properly handled?",
+      "weight": 1.5
+    },
+    {
+      "id": "has_unhandled_errors",
+      "type": "binary",
+      "question": "Does the file ignore error returns or contain unhandled panics/exceptions?",
+      "weight": 1.0
+    },
+    {
+      "id": "defensive_coding",
+      "type": "enum",
+      "options": ["low", "adequate", "strong"],
+      "question": "How effectively does the code enforce preconditions and defensive checks?",
+      "weight": 1.0
+    }
+  ]
+}

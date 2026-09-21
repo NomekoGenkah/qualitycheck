@@ -1,0 +1,448 @@
+use std::io;
+use std::path::Path;
+
+use is_terminal::IsTerminal;
+use serde::{Deserialize, Serialize};
+
+use crate::cache::RawMetricValue;
+use crate::pipeline::ScanPreviewResult;
+use crate::scorer::{FileEvaluation, MetricEvaluation, ScanRunResult};
+
+pub use crate::storage::{get_runs_dir, list_saved_runs, load_saved_run, persist_run_result, RunListItem};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Table,
+    Json,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricDiff {
+    pub metric_id: String,
+    pub old_score: f64,
+    pub new_score: f64,
+    pub delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileDiff {
+    pub profile_name: String,
+    pub old_composite: f64,
+    pub new_composite: f64,
+    pub delta: f64,
+    pub metric_diffs: Vec<MetricDiff>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub relative_path: String,
+    pub profile_diffs: Vec<ProfileDiff>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunDiffReport {
+    pub old_run_id: String,
+    pub new_run_id: String,
+    pub file_diffs: Vec<FileDiff>,
+}
+
+pub fn print_scan_result(
+    result: &ScanRunResult,
+    format: OutputFormat,
+    no_color: bool,
+    saved_path: Option<&Path>,
+) {
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let colors_enabled = !no_color && io::stdout().is_terminal();
+
+            for file in &result.files {
+                println!("{}", file.relative_path);
+
+                for profile in &file.profiles {
+                    for metric in &profile.metrics {
+                        let val_str = format_metric_display(metric);
+                        let conf_pct = (metric.confidence * 100.0).round() as u64;
+
+                        let metric_line = format!(
+                            "  [{}] {}: {} ({}% conf.)",
+                            profile.profile_name, metric.metric_id, val_str, conf_pct
+                        );
+
+                        let colored_line = if colors_enabled {
+                            if metric.normalized_score >= 4.0 {
+                                colorize(&metric_line, "32")
+                            } else if metric.normalized_score >= 3.0 {
+                                colorize(&metric_line, "33")
+                            } else {
+                                colorize(&metric_line, "31")
+                            }
+                        } else {
+                            metric_line
+                        };
+
+                        println!("{}", colored_line);
+                    }
+                }
+
+                let mut composite_parts = Vec::new();
+                for profile in &file.profiles {
+                    let score_str = format!("{} {:.1}/5", profile.profile_name, profile.composite_score);
+                    let part = if colors_enabled {
+                        if profile.passed {
+                            colorize(&score_str, "32")
+                        } else {
+                            colorize(&score_str, "31;1")
+                        }
+                    } else {
+                        score_str
+                    };
+                    composite_parts.push(part);
+                }
+
+                let separator = if colors_enabled { " · " } else { " | " };
+                println!("  Composite score: {}", composite_parts.join(separator));
+                println!();
+            }
+
+            let token_line = if result.cached_files == result.total_files && result.total_files > 0 {
+                format!(
+                    "Tokens consumed: 0 (all {} files served from cache) · Run cost: $0.00000",
+                    result.total_files
+                )
+            } else {
+                format!(
+                    "Tokens consumed: {} input · {} output · Est. cost: ${:.5} ({} files served from cache)",
+                    result.usage.input_tokens,
+                    result.usage.output_tokens,
+                    result.usage.estimated_cost_usd,
+                    result.cached_files
+                )
+            };
+
+            if colors_enabled {
+                println!("{}", colorize(&token_line, "36"));
+            } else {
+                println!("{}", token_line);
+            }
+
+            if let Some(path) = saved_path {
+                let msg = format!("✔ Full report saved to {}", path.display());
+                if colors_enabled {
+                    println!("{}", colorize(&msg, "32"));
+                } else {
+                    println!("{}", msg);
+                }
+            }
+        }
+    }
+}
+
+pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_color: bool) {
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(file).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let colors_enabled = !no_color && io::stdout().is_terminal();
+            println!("{}", file.relative_path);
+            if let Some(u) = &file.usage {
+                let cache_status = if file.served_from_cache { " (served from cache)" } else { "" };
+                println!("Tokens: {} input · {} output{}", u.input_tokens, u.output_tokens, cache_status);
+            }
+
+            for profile in &file.profiles {
+                println!(
+                    "--- Profile: {} (fail below: {:.1}) ---",
+                    profile.profile_name, profile.fail_below
+                );
+                for metric in &profile.metrics {
+                    let val_str = format_metric_display(metric);
+                    let conf_pct = (metric.confidence * 100.0).round() as u64;
+                    let line = format!(
+                        "  {}: {} ({}% conf.) -> normalized: {:.1}/5",
+                        metric.metric_id, val_str, conf_pct, metric.normalized_score
+                    );
+
+                    let colored_line = if colors_enabled {
+                        if metric.normalized_score >= 4.0 {
+                            colorize(&line, "32")
+                        } else if metric.normalized_score >= 3.0 {
+                            colorize(&line, "33")
+                        } else {
+                            colorize(&line, "31")
+                        }
+                    } else {
+                        line
+                    };
+                    println!("{}", colored_line);
+                }
+
+                let comp_str = format!("Composite score: {:.1}/5", profile.composite_score);
+                let status_str = if profile.passed { "PASS" } else { "FAIL" };
+                let summary_line = format!("{} [{}]", comp_str, status_str);
+
+                if colors_enabled {
+                    if profile.passed {
+                        println!("{}", colorize(&summary_line, "32;1"));
+                    } else {
+                        println!("{}", colorize(&summary_line, "31;1"));
+                    }
+                } else {
+                    println!("{}", summary_line);
+                }
+                println!();
+            }
+        }
+    }
+}
+
+pub fn filter_gaps(run: &ScanRunResult) -> ScanRunResult {
+    let mut failing_files = Vec::new();
+
+    for file in &run.files {
+        let mut failing_profiles = Vec::new();
+        for profile in &file.profiles {
+            if !profile.passed {
+                failing_profiles.push(profile.clone());
+            } else {
+                let failing_metrics: Vec<MetricEvaluation> = profile
+                    .metrics
+                    .iter()
+                    .filter(|m| m.normalized_score < profile.fail_below)
+                    .cloned()
+                    .collect();
+
+                if !failing_metrics.is_empty() {
+                    let mut prof_clone = profile.clone();
+                    prof_clone.metrics = failing_metrics;
+                    failing_profiles.push(prof_clone);
+                }
+            }
+        }
+
+        if !failing_profiles.is_empty() {
+            let mut file_clone = file.clone();
+            file_clone.profiles = failing_profiles;
+            failing_files.push(file_clone);
+        }
+    }
+
+    ScanRunResult {
+        run_id: run.run_id.clone(),
+        timestamp: run.timestamp,
+        target_path: run.target_path.clone(),
+        total_files: failing_files.len(),
+        cached_files: run.cached_files,
+        profiles_used: run.profiles_used.clone(),
+        files: failing_files,
+        usage: run.usage.clone(),
+        passed: run.passed,
+        exit_reason: run.exit_reason.clone(),
+    }
+}
+
+pub fn diff_runs(run_a: &ScanRunResult, run_b: &ScanRunResult) -> RunDiffReport {
+    let mut file_diffs = Vec::new();
+
+    for file_b in &run_b.files {
+        let file_a_opt = run_a.files.iter().find(|f| f.relative_path == file_b.relative_path);
+
+        let mut profile_diffs = Vec::new();
+
+        for prof_b in &file_b.profiles {
+            let prof_a_opt = file_a_opt.and_then(|fa| {
+                fa.profiles.iter().find(|p| p.profile_name == prof_b.profile_name)
+            });
+
+            let old_comp = prof_a_opt.map(|p| p.composite_score).unwrap_or(0.0);
+            let new_comp = prof_b.composite_score;
+            let comp_delta = ((new_comp - old_comp) * 10.0).round() / 10.0;
+
+            let mut metric_diffs = Vec::new();
+            for m_b in &prof_b.metrics {
+                let m_a_opt = prof_a_opt.and_then(|pa| {
+                    pa.metrics.iter().find(|m| m.metric_id == m_b.metric_id)
+                });
+
+                let old_m_score = m_a_opt.map(|m| m.normalized_score).unwrap_or(0.0);
+                let new_m_score = m_b.normalized_score;
+                let delta = ((new_m_score - old_m_score) * 10.0).round() / 10.0;
+
+                metric_diffs.push(MetricDiff {
+                    metric_id: m_b.metric_id.clone(),
+                    old_score: old_m_score,
+                    new_score: new_m_score,
+                    delta,
+                });
+            }
+
+            profile_diffs.push(ProfileDiff {
+                profile_name: prof_b.profile_name.clone(),
+                old_composite: old_comp,
+                new_composite: new_comp,
+                delta: comp_delta,
+                metric_diffs,
+            });
+        }
+
+        file_diffs.push(FileDiff {
+            relative_path: file_b.relative_path.clone(),
+            profile_diffs,
+        });
+    }
+
+    RunDiffReport {
+        old_run_id: run_a.run_id.clone(),
+        new_run_id: run_b.run_id.clone(),
+        file_diffs,
+    }
+}
+
+pub fn print_diff_report(report: &RunDiffReport, format: OutputFormat, no_color: bool) {
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let colors_enabled = !no_color && io::stdout().is_terminal();
+            println!("Comparing runs: {} -> {}", report.old_run_id, report.new_run_id);
+            println!();
+
+            for file_diff in &report.file_diffs {
+                println!("{}", file_diff.relative_path);
+                for prof_diff in &file_diff.profile_diffs {
+                    let symbol = if prof_diff.delta > 0.0 { "+" } else { "" };
+                    let line = format!(
+                        "  [{}] composite: {:.1} -> {:.1} ({}{:.1})",
+                        prof_diff.profile_name,
+                        prof_diff.old_composite,
+                        prof_diff.new_composite,
+                        symbol,
+                        prof_diff.delta
+                    );
+
+                    let colored_line = if colors_enabled {
+                        if prof_diff.delta > 0.0 {
+                            colorize(&line, "32")
+                        } else if prof_diff.delta < 0.0 {
+                            colorize(&line, "31")
+                        } else {
+                            line
+                        }
+                    } else {
+                        line
+                    };
+                    println!("{}", colored_line);
+                }
+                println!();
+            }
+        }
+    }
+}
+
+pub fn print_preview_result(
+    preview: &ScanPreviewResult,
+    format: OutputFormat,
+    no_color: bool,
+) {
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(preview).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let colors_enabled = !no_color && io::stdout().is_terminal();
+
+            let profiles_str = preview.profiles.join(", ");
+            let header = format!(
+                "Scan Preview: '{}' · Profiles: [{}] ({} metrics)",
+                preview.target_path, profiles_str, preview.total_metrics
+            );
+            if colors_enabled {
+                println!("{}", colorize(&header, "1;34"));
+            } else {
+                println!("{}", header);
+            }
+            println!("{}", "-".repeat(65));
+
+            for file in &preview.files {
+                let status_tag = if file.served_from_cache {
+                    if colors_enabled {
+                        colorize("[CACHED]", "32")
+                    } else {
+                        "[CACHED]".to_string()
+                    }
+                } else if colors_enabled {
+                    colorize("[UNCACHED]", "33")
+                } else {
+                    "[UNCACHED]".to_string()
+                };
+
+                let cost_info = if file.served_from_cache {
+                    "0 tokens · $0.00000 (cache hit)".to_string()
+                } else {
+                    format!(
+                        "~{} est. tokens · ~${:.5}",
+                        file.estimated_input_tokens, file.estimated_cost_usd
+                    )
+                };
+
+                println!("  {} {:<40} -> {}", status_tag, file.relative_path, cost_info);
+            }
+
+            println!("{}", "-".repeat(65));
+            println!(
+                "Total files: {} ({} uncached, {} cached)",
+                preview.total_files, preview.uncached_files, preview.cached_files
+            );
+
+            let summary_tokens = format!(
+                "Est. tokens: ~{} input tokens · Est. cost: ~${:.5} USD",
+                preview.total_estimated_tokens, preview.total_estimated_cost_usd
+            );
+            if colors_enabled {
+                println!("{}", colorize(&summary_tokens, "36;1"));
+            } else {
+                println!("{}", summary_tokens);
+            }
+
+            let notice = "⚡ Preview mode: No API calls made. No credits deducted.";
+            if colors_enabled {
+                println!("{}", colorize(notice, "90"));
+            } else {
+                println!("{}", notice);
+            }
+        }
+    }
+}
+
+fn format_metric_display(metric: &MetricEvaluation) -> String {
+    match &metric.raw_value {
+        RawMetricValue::Scale(v) => {
+            let rounded = (v * 10.0).round() / 10.0;
+            let display_val = if rounded.fract() == 0.0 {
+                format!("{}", rounded as i64)
+            } else {
+                format!("{:.1}", rounded)
+            };
+            if let Some(r) = metric.range {
+                format!("{}/{}", display_val, r[1] as i64)
+            } else {
+                format!("{}/5", display_val)
+            }
+        }
+        RawMetricValue::Enum(s) => s.clone(),
+        RawMetricValue::Binary(b) => b.to_string(),
+    }
+}
+
+fn colorize(s: &str, ansi_code: &str) -> String {
+    format!("\x1b[{}m{}\x1b[0m", ansi_code, s)
+}
