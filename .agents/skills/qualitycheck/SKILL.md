@@ -29,6 +29,8 @@ Always run `--preview` before executing large scans to check which files are cac
 ```bash
 qualitycheck scan <path> --preview
 ```
+- **Context-safe by default**: Outputs a compact summary and top token-consuming files to avoid polluting the LLM context window.
+- If you explicitly need the full file-by-file list, add `--full` (or `--verbose`).
 - Cache hits consume **0 tokens** ($0.00).
 - Uncached files display an estimated token count and projected USD cost.
 - `--preview` is completely offline and does not require an API key or make network requests.

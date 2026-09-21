@@ -361,9 +361,10 @@ pub fn print_preview_result(
             let colors_enabled = !no_color && io::stdout().is_terminal();
 
             let profiles_str = preview.profiles.join(", ");
+            let mode_suffix = if preview.is_full { " [FULL BREAKDOWN]" } else { "" };
             let header = format!(
-                "Scan Preview: '{}' · Profiles: [{}] ({} metrics)",
-                preview.target_path, profiles_str, preview.total_metrics
+                "Scan Preview: '{}' · Profiles: [{}] ({} metrics){}",
+                preview.target_path, profiles_str, preview.total_metrics, mode_suffix
             );
             if colors_enabled {
                 println!("{}", colorize(&header, "1;34"));
@@ -372,32 +373,59 @@ pub fn print_preview_result(
             }
             println!("{}", "-".repeat(65));
 
-            for file in &preview.files {
-                let status_tag = if file.served_from_cache {
-                    if colors_enabled {
-                        colorize("[CACHED]", "32")
+            if preview.is_full || !preview.files.is_empty() {
+                // Show files (either because --full was requested, or total_files <= 5)
+                for file in &preview.files {
+                    let status_tag = if file.served_from_cache {
+                        if colors_enabled {
+                            colorize("[CACHED]", "32")
+                        } else {
+                            "[CACHED]".to_string()
+                        }
+                    } else if colors_enabled {
+                        colorize("[UNCACHED]", "33")
                     } else {
-                        "[CACHED]".to_string()
-                    }
-                } else if colors_enabled {
-                    colorize("[UNCACHED]", "33")
-                } else {
-                    "[UNCACHED]".to_string()
-                };
+                        "[UNCACHED]".to_string()
+                    };
 
-                let cost_info = if file.served_from_cache {
-                    "0 tokens · $0.00000 (cache hit)".to_string()
-                } else {
-                    format!(
-                        "~{} est. tokens · ~${:.5}",
-                        file.estimated_input_tokens, file.estimated_cost_usd
-                    )
-                };
+                    let cost_info = if file.served_from_cache {
+                        "0 tokens · $0.00000 (cache hit)".to_string()
+                    } else {
+                        format!(
+                            "~{} est. tokens · ~${:.5}",
+                            file.estimated_input_tokens, file.estimated_cost_usd
+                        )
+                    };
 
-                println!("  {} {:<40} -> {}", status_tag, file.relative_path, cost_info);
+                    println!("  {} {:<40} -> {}", status_tag, file.relative_path, cost_info);
+                }
+                println!("{}", "-".repeat(65));
+            } else if !preview.top_uncached.is_empty() {
+                // Summary mode with > 5 files: show top uncached files
+                println!("Top uncached files by estimated tokens:");
+                for file in &preview.top_uncached {
+                    let status_tag = if colors_enabled {
+                        colorize("[UNCACHED]", "33")
+                    } else {
+                        "[UNCACHED]".to_string()
+                    };
+                    println!(
+                        "  {} {:<40} -> ~{} est. tokens · ~${:.5}",
+                        status_tag, file.relative_path, file.estimated_input_tokens, file.estimated_cost_usd
+                    );
+                }
+                let remaining = preview.uncached_files.saturating_sub(preview.top_uncached.len());
+                if remaining > 0 {
+                    let cached_note = if preview.cached_files > 0 {
+                        format!(" ({} cached file(s) omitted)", preview.cached_files)
+                    } else {
+                        String::new()
+                    };
+                    println!("  ... and {} more uncached file(s){}.", remaining, cached_note);
+                }
+                println!("{}", "-".repeat(65));
             }
 
-            println!("{}", "-".repeat(65));
             println!(
                 "Total files: {} ({} uncached, {} cached)",
                 preview.total_files, preview.uncached_files, preview.cached_files
@@ -411,6 +439,15 @@ pub fn print_preview_result(
                 println!("{}", colorize(&summary_tokens, "36;1"));
             } else {
                 println!("{}", summary_tokens);
+            }
+
+            if !preview.is_full && preview.total_files > 5 {
+                let tip = "ℹ Output summarized to preserve LLM context. Use --full (or --verbose) to list all files.";
+                if colors_enabled {
+                    println!("{}", colorize(tip, "33"));
+                } else {
+                    println!("{}", tip);
+                }
             }
 
             let notice = "⚡ Preview mode: No API calls made. No credits deducted.";

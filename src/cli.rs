@@ -104,6 +104,10 @@ pub struct ScanArgs {
     /// Preview the files to be evaluated, token consumption, and estimated cost without calling Jev API
     #[arg(long, alias = "dry-run")]
     pub preview: bool,
+
+    /// Output full per-file breakdown in preview (default: compact summary to save LLM context)
+    #[arg(long, alias = "verbose")]
+    pub full: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -159,6 +163,10 @@ pub struct PatchArgs {
     /// Preview the files to be evaluated, token consumption, and estimated cost without calling Jev API
     #[arg(long, alias = "dry-run")]
     pub preview: bool,
+
+    /// Output full per-file breakdown in preview (default: compact summary to save LLM context)
+    #[arg(long, alias = "verbose")]
+    pub full: bool,
 }
 
 #[derive(Args, Debug, Clone)]

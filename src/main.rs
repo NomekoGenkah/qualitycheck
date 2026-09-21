@@ -166,7 +166,7 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
     };
 
     if args.preview {
-        let preview = run_preview_pipeline(&target_path, &files, &profiles, &project_root)?;
+        let preview = run_preview_pipeline(&target_path, &files, &profiles, &project_root, args.full)?;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }
@@ -247,7 +247,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
     };
 
     if args.preview {
-        let preview = run_preview_pipeline(&project_root, &changed_files, &profiles, &project_root)?;
+        let preview = run_preview_pipeline(&project_root, &changed_files, &profiles, &project_root, args.full)?;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }

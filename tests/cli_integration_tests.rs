@@ -485,3 +485,54 @@ fn test_cli_scan_preview_json_format() {
         .stdout(predicate::str::contains("\"uncached_files\": 1"))
         .stdout(predicate::str::contains("\"served_from_cache\": false"));
 }
+
+#[test]
+fn test_cli_scan_preview_summary_vs_full() {
+    let tmp_repo = tempdir().unwrap();
+    // Create 7 files (> 5 threshold)
+    for i in 1..=7 {
+        fs::write(
+            tmp_repo.path().join(format!("file_{}.rs", i)),
+            format!("pub fn func_{}() {{}}", i),
+        )
+        .unwrap();
+    }
+
+    let tmp_config = tempdir().unwrap();
+
+    // 1. Without --full: JSON output should omit "files" array and have "top_uncached"
+    let mut summary_cmd = Command::cargo_bin("qualitycheck").unwrap();
+    summary_cmd
+        .current_dir(tmp_repo.path())
+        .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+        .env_remove("JEV_API_KEY")
+        .arg("scan")
+        .arg(".")
+        .arg("--preview")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_files\": 7"))
+        .stdout(predicate::str::contains("\"is_full\": false"))
+        .stdout(predicate::str::contains("\"top_uncached\""))
+        .stdout(predicate::str::contains("\"files\"").not());
+
+    // 2. With --full: JSON output should include "files" array with all 7 files
+    let mut full_cmd = Command::cargo_bin("qualitycheck").unwrap();
+    full_cmd
+        .current_dir(tmp_repo.path())
+        .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+        .env_remove("JEV_API_KEY")
+        .arg("scan")
+        .arg(".")
+        .arg("--preview")
+        .arg("--full")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_files\": 7"))
+        .stdout(predicate::str::contains("\"is_full\": true"))
+        .stdout(predicate::str::contains("\"files\""));
+}

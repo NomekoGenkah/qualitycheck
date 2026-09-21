@@ -210,6 +210,10 @@ pub struct ScanPreviewResult {
     pub total_metrics: usize,
     pub total_estimated_tokens: u64,
     pub total_estimated_cost_usd: f64,
+    pub is_full: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_uncached: Vec<FilePreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FilePreview>,
 }
 
@@ -225,6 +229,7 @@ pub fn run_preview_pipeline(
     file_paths: &[PathBuf],
     profiles: &[Profile],
     project_root: &Path,
+    full: bool,
 ) -> Result<ScanPreviewResult, QualityCheckError> {
     let metrics_hash = compute_active_metrics_hash(profiles);
     let all_metrics = collect_unique_metrics(profiles);
@@ -264,18 +269,42 @@ pub fn run_preview_pipeline(
 
     file_previews.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
+    let total_files = file_previews.len();
+    let uncached_files = total_files - cached_count;
+
+    let mut uncached_sorted: Vec<FilePreview> = file_previews
+        .iter()
+        .filter(|f| !f.served_from_cache)
+        .cloned()
+        .collect();
+    uncached_sorted.sort_by(|a, b| b.estimated_input_tokens.cmp(&a.estimated_input_tokens));
+
+    let top_uncached = if !full && total_files > 5 {
+        uncached_sorted.into_iter().take(5).collect()
+    } else {
+        Vec::new()
+    };
+
+    let files_to_include = if full || total_files <= 5 {
+        file_previews
+    } else {
+        Vec::new()
+    };
+
     let total_cost = (total_tokens as f64 * 0.042) / 1_000_000.0;
     let profiles_used = profiles.iter().map(|p| p.name.clone()).collect();
 
     Ok(ScanPreviewResult {
         target_path: target_path.to_string_lossy().to_string(),
-        total_files: file_previews.len(),
+        total_files,
         cached_files: cached_count,
-        uncached_files: file_previews.len() - cached_count,
+        uncached_files,
         profiles: profiles_used,
         total_metrics,
         total_estimated_tokens: total_tokens,
         total_estimated_cost_usd: total_cost,
-        files: file_previews,
+        is_full: full,
+        top_uncached,
+        files: files_to_include,
     })
 }

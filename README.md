@@ -59,14 +59,19 @@ export JEV_API_KEY="your-api-key"
 
 ### 1. Offline Token & Cost Preview (`--preview` / `--dry-run`)
 
+By default, `--preview` outputs a **compact summary** (including top token-consuming files) to preserve LLM context windows and prevent output spam. Use `--full` (or `--verbose`) for a complete file-by-file breakdown:
+
 ```bash
-# Estimate token consumption and cost for a directory (0 network requests, works offline)
+# Compact preview for a directory (0 network requests, works offline)
 qualitycheck scan . --preview
 
 # Estimate cost for git uncommitted changes
 qualitycheck patch --preview
 
-# Machine-readable preview for agents
+# Full file-by-file breakdown (opt-in)
+qualitycheck scan . --preview --full
+
+# Machine-readable preview for agents (compact JSON by default)
 qualitycheck scan src/ --preview --format json
 ```
 
