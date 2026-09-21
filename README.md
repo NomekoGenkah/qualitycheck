@@ -1,17 +1,22 @@
 # qualitycheck
 
-A Rust CLI that uses the **Jev** API (TypeSafe AI) to score code quality in a quantifiable, configurable way — think "eslint, but for qualitative criteria" (naming, cohesion, security posture, etc.) that a traditional linter cannot evaluate.
+[![CI](https://github.com/NomekoGenkah/qualitycheck/actions/workflows/ci.yml/badge.svg)](https://github.com/NomekoGenkah/qualitycheck/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-2024%20%7C%202021-orange.svg)](https://www.rust-lang.org/)
 
-Designed to be run by humans directly, in CI pipelines, or invoked by coding agents (Claude Code, Codex, Cursor, etc.) as a fast, deterministic shell tool.
+A fast, deterministic Rust CLI that uses the **Jev** API (TypeSafe AI) to score code quality in a quantifiable, configurable way — think "eslint, but for qualitative criteria" (naming clarity, dead code, cyclomatic complexity, cohesion, security posture) that traditional linters cannot evaluate.
+
+Designed to be run by humans directly, in CI pipelines, or invoked by AI coding agents (Claude Code, Codex, Cursor, Antigravity, OpenCode) as a fast, deterministic shell tool.
 
 ---
 
 ## Key Features
 
 - **Deterministic Aggregation**: Jev returns raw typed metric values (`scale`, `enum`, `binary`) with calibrated confidence. All aggregation (weighted averages, threshold comparisons, and gating decisions) is calculated deterministically in Rust.
-- **Library-First Architecture**: Core modules (`profile`, `walker`, `git`, `cache`, `jev_client`, `scorer`, `output`, `config`) have no dependency on CLI frontends.
-- **Content-Addressed Caching**: Powered by `blake3(file_content) + blake3(active_metric_definitions)`. Re-scans cost zero API calls and zero latency for unchanged files. Editing a metric automatically invalidates stale results without manual intervention.
-- **Git-Aware Scans (`patch`)**: Scores files modified versus working tree or upstream base branch.
+- **Content-Addressed Caching**: Powered by `blake3(file_content) + blake3(active_metric_definitions)`. Re-scans cost zero API calls and zero latency for unchanged files. Editing a metric automatically invalidates stale results.
+- **Offline Token & Cost Estimation (`--preview`)**: Pre-calculate token usage and estimated cost before making any API calls. Fully offline, 0 network requests, and aware of cached files.
+- **Token & Cost Tracking**: Live runs report exact input/output tokens and cost ($0.042 / 1M input tokens), reporting $0.00 for cache hits.
+- **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or upstream base branch.
 - **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
 - **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
 
@@ -19,9 +24,21 @@ Designed to be run by humans directly, in CI pipelines, or invoked by coding age
 
 ## Installation & Setup
 
+### From Source
 ```bash
 cargo build --release
 cp target/release/qualitycheck /usr/local/bin/ # or place in your PATH
+```
+
+Or install directly to your cargo bin:
+```bash
+cargo install --path .
+```
+
+### Agent Skill Installation
+If you use AI coding agents (Claude Code, OpenCode, Cursor, Antigravity), install the global skill via `npx skills`:
+```bash
+npx skills add NomekoGenkah/qualitycheck -g -y
 ```
 
 ### First-Time Initialization
@@ -40,7 +57,20 @@ export JEV_API_KEY="your-api-key"
 
 ## CLI Usage
 
-### 1. Scanning Code
+### 1. Offline Token & Cost Preview (`--preview` / `--dry-run`)
+
+```bash
+# Estimate token consumption and cost for a directory (0 network requests, works offline)
+qualitycheck scan . --preview
+
+# Estimate cost for git uncommitted changes
+qualitycheck patch --preview
+
+# Machine-readable preview for agents
+qualitycheck scan src/ --preview --format json
+```
+
+### 2. Scanning Code
 
 ```bash
 # Scan current directory with default "quality" profile
@@ -56,7 +86,7 @@ qualitycheck scan ./src --profile quality,security --format json
 qualitycheck scan ./src --strict
 ```
 
-### 2. Git Patch Scans
+### 3. Git Patch Scans
 
 ```bash
 # Scan uncommitted changes in the working tree
@@ -66,7 +96,7 @@ qualitycheck patch
 qualitycheck patch --base main --strict --format json
 ```
 
-### 3. Triage & History
+### 4. Triage & History
 
 ```bash
 # Gaps triage: view files/metrics that failed their threshold in the latest run
@@ -82,7 +112,7 @@ qualitycheck diff <run-id-1> <run-id-2>
 qualitycheck runs list
 ```
 
-### 4. Profiles & Agent Introspection
+### 5. Profiles & Agent Introspection
 
 ```bash
 # List available profiles (built-in and ~/.config/qualitycheck/profiles/)
@@ -109,7 +139,7 @@ qualitycheck describe
 
 ## Profiles Data Model
 
-Profiles are stored in JSON (built into binary and copied to `~/.config/qualitycheck/profiles/`):
+Profiles are stored in JSON (built into the binary and copied to `~/.config/qualitycheck/profiles/`):
 
 ```json
 {
@@ -150,6 +180,7 @@ Profiles are stored in JSON (built into binary and copied to `~/.config/qualityc
 qualitycheck/
 ├── Cargo.toml
 ├── profiles/          # Default profiles (qa.json, security.json, quality.json)
+├── skills/            # Open agent skill package
 ├── src/
 │   ├── lib.rs         # Library root
 │   ├── main.rs        # Entry point and command routing
@@ -160,7 +191,9 @@ qualitycheck/
 │   ├── git.rs         # Git changed files detection for patch command
 │   ├── cache.rs       # Blake3 content-addressed cache (.qualitycheck/cache/)
 │   ├── jev_client.rs  # Async batch client for TypeSafe AI Jev API
+│   ├── pipeline.rs    # Concurrent scan orchestration & offline preview estimation
 │   ├── scorer.rs      # Metric score normalization and weighted composite aggregation
+│   ├── storage.rs     # Run persistence and run listing (.qualitycheck/runs/)
 │   ├── output.rs      # Table/JSON display, report persistence, triage & diffing
 │   └── error.rs       # Typed errors (thiserror) with exit codes
 └── tests/
@@ -168,3 +201,9 @@ qualitycheck/
     ├── cache_tests.rs
     └── cli_integration_tests.rs
 ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

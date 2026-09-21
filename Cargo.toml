@@ -2,6 +2,14 @@
 name = "qualitycheck"
 version = "0.1.0"
 edition = "2024"
+description = "Quantifiable, configurable code quality evaluation using TypeSafe AI Jev"
+license = "MIT"
+authors = ["Pedro Rojas <166954170+NomekoGenkah@users.noreply.github.com>"]
+repository = "https://github.com/NomekoGenkah/qualitycheck"
+homepage = "https://github.com/NomekoGenkah/qualitycheck"
+readme = "README.md"
+keywords = ["code-quality", "linter", "ai", "cli", "jev"]
+categories = ["command-line-utilities", "development-tools::debugging"]
 
 [lib]
 name = "qualitycheck"
