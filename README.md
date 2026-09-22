@@ -114,6 +114,26 @@ qualitycheck patch --base main --fail-on-regression 0.5
 With `--delta`, base versions go through the same content-addressed cache, so re-running after
 further edits only re-scores what changed. `--preview` includes the base versions in its estimate.
 
+### Cross-file context
+
+Each file is scored on its own by default, so a thin controller that hands validation to a service
+can be marked down for "poor input validation" that lives one file over. `--context` (on `scan` and
+`patch`) sends Jev related files alongside each file, and every question is told to judge only the
+file itself:
+
+```bash
+qualitycheck patch --base main --context
+qualitycheck scan src/web/Controller.java --context --preview --full   # see what would be attached
+```
+
+Related files are picked by name matching, without model calls: test files named after the file
+(`ServiceTest.java`, `service.spec.ts`, `tests/service_tests.rs`), files anywhere in the repository
+whose name it mentions, and files in the change set or its directory that mention it. They must be
+in the same language, are ranked by how often they're mentioned, and are capped at about 24k
+characters per file. Expect roughly 2–3× the input tokens for files that get context. With `--delta`,
+the base side is shown the base versions of related files. Answers with and without context are
+cached separately.
+
 ### 4. Triage & History
 
 ```bash

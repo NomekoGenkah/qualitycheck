@@ -82,6 +82,9 @@ pub fn print_scan_result(
 
             for file in &result.files {
                 println!("{}", file.relative_path);
+                if !file.context_files.is_empty() {
+                    println!("  context: {}", file.context_files.join(", "));
+                }
 
                 for profile in &file.profiles {
                     for metric in &profile.metrics {
@@ -424,6 +427,9 @@ pub fn print_preview_result(
                     };
 
                     println!("  {} {:<40} -> {}", status_tag, file.relative_path, cost_info);
+                    if !file.context_files.is_empty() {
+                        println!("      context: {}", file.context_files.join(", "));
+                    }
                 }
                 println!("{}", "-".repeat(65));
             } else if !preview.top_uncached.is_empty() {

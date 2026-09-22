@@ -60,6 +60,9 @@ pub struct FileEvaluation {
     pub served_from_cache: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::cache::JevUsage>,
+    /// Repository-relative paths of the related files shown to Jev with this file (`--context`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_files: Vec<String>,
     pub profiles: Vec<ProfileEvaluation>,
 }
 

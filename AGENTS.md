@@ -13,6 +13,8 @@ Welcome! This document provides AI coding agents (Claude Code, Cursor, OpenCode,
   - `src/cli.rs`: Clap command definitions and flags (`scan`, `patch`, `gaps`, `file`, `diff`, `runs`, `profiles`, `init`, `describe`).
   - `src/jev_client.rs`: Async client for Jev API (`evaluate_file`).
   - `src/cache.rs`: Blake3 content-addressed cache in `.qualitycheck/cache/`.
+  - `src/context.rs`: Deterministic selection of related files sent as context (`--context`).
+  - `src/git.rs`: Changed files and their base-revision content for `patch`.
   - `src/pipeline.rs`: Concurrent scanning pipeline & offline token pre-estimation (`--preview`).
   - `src/scorer.rs`: Metric normalization and weighted composite aggregation.
   - `src/storage.rs`: Historical run persistence under `.qualitycheck/runs/`.

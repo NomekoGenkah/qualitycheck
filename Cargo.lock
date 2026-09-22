@@ -1545,6 +1545,7 @@ dependencies = [
 name = "qualitycheck"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "assert_cmd",
  "blake3",

@@ -108,6 +108,12 @@ pub struct ScanArgs {
     /// Output full per-file breakdown in preview (default: compact summary to save LLM context)
     #[arg(long, alias = "verbose")]
     pub full: bool,
+
+    /// Show Jev related files (tests, files this one references, files that reference it) from
+    /// the scanned set and each file's directory, so delegated work isn't scored as missing.
+    /// Costs more tokens per file
+    #[arg(long)]
+    pub context: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -177,6 +183,12 @@ pub struct PatchArgs {
     /// Output full per-file breakdown in preview (default: compact summary to save LLM context)
     #[arg(long, alias = "verbose")]
     pub full: bool,
+
+    /// Show Jev related files (tests, files this one references, files that reference it) from
+    /// the change set and each file's directory, so delegated work isn't scored as missing.
+    /// Costs more tokens per file
+    #[arg(long)]
+    pub context: bool,
 }
 
 #[derive(Args, Debug, Clone)]

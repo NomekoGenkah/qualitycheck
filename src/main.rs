@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ use qualitycheck::config::{
     execute_init, get_config_file_path, install_default_profiles, resolve_api_key,
     resolve_jev_url,
 };
+use qualitycheck::context::{attach_related_files, base_side_overrides};
 use qualitycheck::error::{ConfigError, QualityCheckError, ScanError};
 use qualitycheck::git::{find_repo_root, get_changed_files, ChangedFile};
 use qualitycheck::jev_client::JevClient;
@@ -23,7 +24,7 @@ use qualitycheck::output::{
     print_scan_result, OutputFormat, PatchDeltaReport,
 };
 use qualitycheck::pipeline::{
-    run_preview_pipeline, run_preview_pipeline_on_inputs, run_scan_pipeline_on_inputs, ScanInput,
+    run_preview_pipeline_on_inputs, run_scan_pipeline_on_inputs, ScanInput,
 };
 use qualitycheck::profile::{list_available_profiles, load_profile, load_profiles_by_names};
 use qualitycheck::scorer::{find_regressions, run_scan_pipeline, RunUsage};
@@ -182,8 +183,13 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
         _ => OutputFormat::Table,
     };
 
+    let mut inputs: Vec<ScanInput> = files.into_iter().map(ScanInput::from_disk).collect();
+    if args.context {
+        attach_related_files(&mut inputs, &project_root, &HashMap::new(), args.max_file_size);
+    }
+
     if args.preview {
-        let preview = run_preview_pipeline(&target_path, &files, &profiles, &project_root, args.full)?;
+        let preview = run_preview_pipeline_on_inputs(&target_path, &inputs, &profiles, &project_root, args.full)?;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }
@@ -203,14 +209,14 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
     eprintln!(
         "Scanning {} ({} files, {}, concurrency {})...",
         targets_label,
-        files.len(),
+        inputs.len(),
         ignore_status,
         args.concurrency
     );
 
-    let scan_result = run_scan_pipeline(
+    let scan_result = run_scan_pipeline_on_inputs(
         &target_path,
-        &files,
+        inputs,
         &profiles,
         client,
         args.concurrency,
@@ -286,28 +292,38 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         _ => OutputFormat::Table,
     };
 
-    let head_inputs: Vec<ScanInput> = changed_files
+    let mut head_inputs: Vec<ScanInput> = changed_files
         .iter()
         .map(|f| ScanInput::from_disk(f.path.clone()))
         .collect();
+    if args.context {
+        attach_related_files(&mut head_inputs, &project_root, &HashMap::new(), args.max_file_size);
+    }
+    let base_overrides = if compare_base && args.context {
+        base_side_overrides(&changed_files, &project_root, args.max_file_size)
+    } else {
+        HashMap::new()
+    };
     // Each file's base version is scored under its current path so the two sides line up; a
     // base that is binary, empty, or oversized counts as no base.
-    let base_inputs: Vec<ScanInput> = if compare_base {
+    let mut base_inputs: Vec<ScanInput> = if compare_base {
         changed_files
             .into_iter()
             .filter_map(|f| {
                 let content = f
                     .base_content
                     .filter(|bytes| is_content_eligible(bytes, args.max_file_size))?;
-                Some(ScanInput {
-                    path: f.path,
-                    content: Some(content),
-                })
+                Some(ScanInput::in_memory(f.path, content))
             })
             .collect()
     } else {
         Vec::new()
     };
+    if args.context {
+        // The base side sees the base versions of related files, so score changes reflect the
+        // code rather than a difference in context.
+        attach_related_files(&mut base_inputs, &project_root, &base_overrides, args.max_file_size);
+    }
 
     if args.preview {
         // Base versions are labelled for display only; their content is already in memory.
@@ -318,7 +334,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
             labelled.push(&base_label);
             ScanInput {
                 path: PathBuf::from(labelled),
-                content: input.content,
+                ..input
             }
         }));
         let preview = run_preview_pipeline_on_inputs(&project_root, &inputs, &profiles, &project_root, args.full)?;

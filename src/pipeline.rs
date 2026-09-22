@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use crate::cache::{
@@ -10,7 +11,8 @@ use crate::cache::{
     CachedFileResult, CACHE_FORMAT_VERSION,
 };
 use crate::error::{QualityCheckError, ScanError};
-use crate::jev_client::JevClient;
+use crate::context::RelatedFile;
+use crate::jev_client::{JevClient, CONTEXT_PREAMBLE};
 use crate::profile::{compute_active_metrics_hash, Metric, Profile, Rubric};
 use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, SCORING_VERSION};
 
@@ -20,24 +22,52 @@ use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, S
 pub struct ScanInput {
     pub path: PathBuf,
     pub content: Option<Vec<u8>>,
+    /// Other files shown to Jev as context (`--context`).
+    pub related: Vec<RelatedFile>,
 }
 
 impl ScanInput {
     pub fn from_disk(path: PathBuf) -> Self {
-        Self { path, content: None }
+        Self { path, content: None, related: Vec::new() }
     }
 
-    fn into_bytes(self) -> Result<(PathBuf, Vec<u8>), QualityCheckError> {
-        match self.content {
-            Some(bytes) => Ok((self.path, bytes)),
-            None => {
-                let bytes = std::fs::read(&self.path).map_err(|e| {
-                    QualityCheckError::Scan(ScanError::FileReadError(self.path.clone(), e))
-                })?;
-                Ok((self.path, bytes))
-            }
-        }
+    pub fn in_memory(path: PathBuf, content: Vec<u8>) -> Self {
+        Self { path, content: Some(content), related: Vec::new() }
     }
+}
+
+fn read_input_bytes(path: &Path, content: Option<Vec<u8>>) -> Result<Vec<u8>, QualityCheckError> {
+    match content {
+        Some(bytes) => Ok(bytes),
+        None => std::fs::read(path)
+            .map_err(|e| QualityCheckError::Scan(ScanError::FileReadError(path.to_path_buf(), e))),
+    }
+}
+
+/// What Jev evaluates: the file's text or, when it has related files, an object with the file
+/// under evaluation (`file`) and its `related_files`. Also returns the key under which answers
+/// for this exact state are cached: plain files keep the metrics hash alone, so their cache is
+/// shared with runs without `--context`.
+fn evaluation_state(
+    file_bytes: &[u8],
+    path: &Path,
+    project_root: &Path,
+    related: &[RelatedFile],
+    metrics_hash: &str,
+) -> (Value, String) {
+    let content = String::from_utf8_lossy(file_bytes).into_owned();
+    if related.is_empty() {
+        return (Value::String(content), metrics_hash.to_string());
+    }
+    let state = serde_json::json!({
+        "file": {
+            "path": compute_relative_display_path(path, project_root),
+            "content": content,
+        },
+        "related_files": related,
+    });
+    let state_hash = blake3::hash(state.to_string().as_bytes()).to_hex();
+    (state, format!("{metrics_hash}:context:{state_hash}"))
 }
 
 /// Orquestación concurrente y cacheada del pipeline de evaluación de archivos.
@@ -172,21 +202,18 @@ async fn evaluate_single_file(
     profiles: &[Profile],
     client: &JevClient,
 ) -> Result<FileEvaluation, QualityCheckError> {
-    let (path, file_bytes) = input.into_bytes()?;
+    let ScanInput { path, content, related } = input;
     let path = path.as_path();
-    let (cache_key, file_hash) = compute_cache_key(&file_bytes, metrics_hash);
+    let file_bytes = read_input_bytes(path, content)?;
+    let (state, cache_scope) = evaluation_state(&file_bytes, path, project_root, &related, metrics_hash);
+    let (cache_key, file_hash) = compute_cache_key(&file_bytes, &cache_scope);
 
     let (metric_results, served_from_cache, usage) = if let Some(mut cached) = get_cached_result(project_root, &cache_key) {
         upgrade_cached_result(&mut cached, metrics);
         (cached.metrics, true, cached.usage)
     } else {
-        let content_str = match String::from_utf8(file_bytes.clone()) {
-            Ok(s) => s,
-            Err(_) => String::from_utf8_lossy(&file_bytes).into_owned(),
-        };
-
         let eval_res = client
-            .evaluate_file(&content_str, metrics)
+            .evaluate_file(&state, metrics)
             .await
             .map_err(QualityCheckError::Jev)?;
 
@@ -211,6 +238,7 @@ async fn evaluate_single_file(
         relative_path,
         served_from_cache,
         usage,
+        context_files: related.into_iter().map(|r| r.path).collect(),
         profiles: profile_evals,
     })
 }
@@ -239,6 +267,8 @@ pub struct FilePreview {
     pub served_from_cache: bool,
     pub estimated_input_tokens: u64,
     pub estimated_cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -258,26 +288,31 @@ pub struct ScanPreviewResult {
     pub files: Vec<FilePreview>,
 }
 
-pub fn estimate_file_tokens(file_bytes_len: usize, metrics: &[Metric]) -> u64 {
+pub fn estimate_file_tokens(state_len: usize, metrics: &[Metric], with_context: bool) -> u64 {
     let baseline_system_prompt = 250u64;
-    let questions_tokens: u64 = metrics.iter().map(estimate_question_tokens).sum();
-    baseline_system_prompt + questions_tokens + chars_to_tokens(file_bytes_len)
+    let questions_tokens: u64 = metrics
+        .iter()
+        .map(|metric| estimate_question_tokens(metric, with_context))
+        .sum();
+    baseline_system_prompt + questions_tokens + chars_to_tokens(state_len)
 }
 
 /// Question text (instructions and rubric) plus per-question framing, and the same again for
-/// the `applies_when` yes/no question when the metric has one.
-fn estimate_question_tokens(metric: &Metric) -> u64 {
-    const FRAMING_TOKENS: u64 = 30;
+/// the `applies_when` yes/no question when the metric has one. With context, every question
+/// also carries the context preamble.
+fn estimate_question_tokens(metric: &Metric, with_context: bool) -> u64 {
+    let framing_tokens =
+        30 + if with_context { chars_to_tokens(CONTEXT_PREAMBLE.len()) } else { 0 };
     let rubric_len: usize = match &metric.rubric {
         Some(Rubric::Levels(levels)) => levels.iter().map(String::len).sum(),
         Some(Rubric::Descriptions(map)) => map.iter().map(|(k, v)| k.len() + v.len()).sum(),
         None => 0,
     };
-    let main_question = FRAMING_TOKENS + chars_to_tokens(metric.question.len() + rubric_len);
+    let main_question = framing_tokens + chars_to_tokens(metric.question.len() + rubric_len);
     let applicability_question = metric
         .applies_when
         .as_ref()
-        .map_or(0, |condition| FRAMING_TOKENS + chars_to_tokens(condition.len()));
+        .map_or(0, |condition| framing_tokens + chars_to_tokens(condition.len()));
     main_question + applicability_question
 }
 
@@ -324,14 +359,20 @@ pub fn run_preview_pipeline_on_inputs(
             }
         };
 
-        let (cache_key, _) = compute_cache_key(file_bytes, &metrics_hash);
+        let (state, cache_scope) =
+            evaluation_state(file_bytes, path, project_root, &input.related, &metrics_hash);
+        let (cache_key, _) = compute_cache_key(file_bytes, &cache_scope);
         let in_cache = get_cached_result(project_root, &cache_key).is_some();
+        let state_len = match &state {
+            Value::String(text) => text.len(),
+            other => other.to_string().len(),
+        };
 
         let (est_tokens, est_cost) = if in_cache {
             cached_count += 1;
             (0u64, 0.0f64)
         } else {
-            let tokens = estimate_file_tokens(file_bytes.len(), &all_metrics);
+            let tokens = estimate_file_tokens(state_len, &all_metrics, !input.related.is_empty());
             let cost = (tokens as f64 * 0.042) / 1_000_000.0;
             total_tokens += tokens;
             (tokens, cost)
@@ -345,6 +386,7 @@ pub fn run_preview_pipeline_on_inputs(
             served_from_cache: in_cache,
             estimated_input_tokens: est_tokens,
             estimated_cost_usd: est_cost,
+            context_files: input.related.iter().map(|r| r.path.clone()).collect(),
         });
     }
 

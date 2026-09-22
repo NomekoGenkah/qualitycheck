@@ -805,8 +805,8 @@ fn test_cli_scan_excludes_not_applicable_metrics() {
         .stdout(predicate::str::contains("Composite score: quality 5.0/5"));
 }
 
-/// Serves Jev responses chosen from the evaluated file content (the request's `state`).
-fn spawn_content_aware_mock_jev(respond: fn(&str) -> serde_json::Value) -> String {
+/// Serves Jev responses chosen from each request body.
+fn spawn_content_aware_mock_jev(respond: fn(&serde_json::Value) -> serde_json::Value) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}/v1/systemone", listener.local_addr().unwrap().port());
     thread::spawn(move || {
@@ -840,8 +840,7 @@ fn spawn_content_aware_mock_jev(respond: fn(&str) -> serde_json::Value) -> Strin
             }
             let body: serde_json::Value =
                 serde_json::from_slice(&request[body_start..]).unwrap_or_default();
-            let state = body["state"].as_str().unwrap_or_default();
-            let response = respond(state).to_string();
+            let response = respond(&body).to_string();
             let http_response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(),
@@ -854,8 +853,13 @@ fn spawn_content_aware_mock_jev(respond: fn(&str) -> serde_json::Value) -> Strin
 }
 
 /// Files containing "HIGH_QUALITY" score 4.8/5 on the quality profile; anything else 1.0/5.
-fn quality_by_marker(state: &str) -> serde_json::Value {
-    if state.contains("HIGH_QUALITY") {
+fn quality_by_marker(body: &serde_json::Value) -> serde_json::Value {
+    quality_answers(body["state"].to_string().contains("HIGH_QUALITY"))
+}
+
+/// Quality-profile answers worth 4.8/5 when `high`, 1.0/5 otherwise.
+fn quality_answers(high: bool) -> serde_json::Value {
+    if high {
         serde_json::json!({ "answers": {
             "naming_clarity": { "score": 3.5, "confidence": 0.9 },
             "naming_clarity:applies": { "noul": 0.97 },
@@ -986,4 +990,99 @@ fn test_cli_patch_delta_preview_counts_both_sides_offline() {
         .stdout(predicate::str::contains("\"total_files\": 3"))
         .stdout(predicate::str::contains("controller.rs (at HEAD)"))
         .stdout(predicate::str::contains("service.rs (at HEAD)").not());
+}
+
+const CONTROLLER_JAVA: &str =
+    "class Controlador { Servicio servicio; void post(Req r) { servicio.crear(r); } }\n";
+
+/// High quality only when the request carries related files as context, with every question
+/// told to judge `file` alone; low otherwise.
+fn quality_with_context(body: &serde_json::Value) -> serde_json::Value {
+    let has_context = body["state"]["related_files"].as_array().is_some_and(|r| !r.is_empty());
+    let questions_scoped = body["questions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|q| q["instructions"].as_str().unwrap().contains("Answer only about `file.content`"));
+    quality_answers(has_context && questions_scoped)
+}
+
+fn file_entry<'a>(run: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    run["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["relative_path"] == path)
+        .unwrap_or_else(|| panic!("{path} missing from run"))
+}
+
+#[test]
+fn test_cli_patch_context_sends_the_delegated_service() {
+    let url = spawn_content_aware_mock_jev(quality_with_context);
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let _repo = git2::Repository::init(root).unwrap();
+    fs::create_dir_all(root.join("web")).unwrap();
+    fs::create_dir_all(root.join("core")).unwrap();
+    fs::write(root.join("web/Controlador.java"), CONTROLLER_JAVA).unwrap();
+    fs::write(root.join("core/Servicio.java"), "class Servicio { void crear(Req r) {} }\n").unwrap();
+    let config = tempdir().unwrap();
+
+    let with_context = patch_cmd(root, config.path(), &url, &["--context", "--format", "json"]).success();
+    let run: serde_json::Value = serde_json::from_slice(&with_context.get_output().stdout).unwrap();
+    let controller = file_entry(&run, "web/Controlador.java");
+    assert_eq!(controller["context_files"], serde_json::json!(["core/Servicio.java"]));
+    assert_eq!(controller["profiles"][0]["composite_score"], 4.8);
+    assert_eq!(
+        file_entry(&run, "core/Servicio.java")["context_files"],
+        serde_json::json!(["web/Controlador.java"])
+    );
+
+    // Answers given with context are cached separately from answers without it.
+    let without = patch_cmd(root, config.path(), &url, &["--format", "json"]).success();
+    let run: serde_json::Value = serde_json::from_slice(&without.get_output().stdout).unwrap();
+    let controller = file_entry(&run, "web/Controlador.java");
+    assert_eq!(controller["served_from_cache"], false);
+    assert!(controller.get("context_files").is_none());
+    assert_eq!(controller["profiles"][0]["composite_score"], 1.0);
+}
+
+/// High quality only when the related files shown are the base (v1) version of the service.
+fn quality_if_service_v1_in_context(body: &serde_json::Value) -> serde_json::Value {
+    quality_answers(body["state"]["related_files"].to_string().contains("SERVICE_V1"))
+}
+
+#[test]
+fn test_cli_patch_delta_context_uses_base_versions_of_related_files() {
+    let url = spawn_content_aware_mock_jev(quality_if_service_v1_in_context);
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let repo = git2::Repository::init(root).unwrap();
+    fs::create_dir_all(root.join("web")).unwrap();
+    fs::create_dir_all(root.join("core")).unwrap();
+    fs::write(root.join("web/Controlador.java"), format!("{CONTROLLER_JAVA}// v1\n")).unwrap();
+    fs::write(root.join("core/Servicio.java"), "class Servicio { /* SERVICE_V1 */ }\n").unwrap();
+    commit_all(&repo, "base");
+
+    fs::write(root.join("web/Controlador.java"), format!("{CONTROLLER_JAVA}// v2\n")).unwrap();
+    fs::write(root.join("core/Servicio.java"), "class Servicio { /* SERVICE_V2 */ }\n").unwrap();
+    let config = tempdir().unwrap();
+
+    // Base side: the controller is shown the v1 service (high); working tree: v2 (low). Had the
+    // base side been shown the working-tree service, both sides would score low and match.
+    let assert = patch_cmd(
+        root,
+        config.path(),
+        &url,
+        &["--base", "HEAD", "--context", "--fail-on-regression", "0.5", "--format", "json"],
+    )
+    .code(1);
+    let report: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let regressed: Vec<&str> = report["regressions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["relative_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(regressed, vec!["web/Controlador.java"]);
 }

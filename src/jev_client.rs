@@ -16,10 +16,16 @@ pub struct JevClient {
     endpoint_url: String,
 }
 
+/// Prefixed to every question when the state carries related files (`--context`).
+pub const CONTEXT_PREAMBLE: &str = "The state has `file`, the file under evaluation, and \
+`related_files`: other files from the same codebase that it references, that reference it, or \
+that test it. Answer only about `file.content`. Use `related_files` only to see where work that \
+`file` delegates or receives is done and how it is tested; do not evaluate them.";
+
 #[derive(Debug, Serialize)]
 struct JevRequest<'a> {
     model: &'a str,
-    state: &'a str,
+    state: &'a Value,
     questions: HashMap<String, JevQuestion<'a>>,
 }
 
@@ -27,7 +33,7 @@ struct JevRequest<'a> {
 struct JevQuestion<'a> {
     #[serde(rename = "type")]
     question_type: &'a str,
-    instructions: &'a str,
+    instructions: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     criteria: Option<Value>,
 }
@@ -46,9 +52,11 @@ impl JevClient {
         }
     }
 
+    /// Asks every metric's questions over `state`: the file's text, or an object with `file`
+    /// and `related_files` when cross-file context is used.
     pub async fn evaluate_file(
         &self,
-        file_content: &str,
+        state: &Value,
         metrics: &[Metric],
     ) -> Result<JevEvaluationResult, JevError> {
         if metrics.is_empty() {
@@ -60,8 +68,8 @@ impl JevClient {
 
         let request_body = JevRequest {
             model: "jev-latest",
-            state: file_content,
-            questions: build_questions(metrics),
+            state,
+            questions: build_questions(metrics, state.is_object()),
         };
 
         let mut headers = HeaderMap::new();
@@ -135,7 +143,14 @@ impl JevClient {
 
 /// One question per metric, plus a yes/no question for each metric's `applies_when`. They all
 /// share the file as state and are answered independently in the same request.
-fn build_questions(metrics: &[Metric]) -> HashMap<String, JevQuestion<'_>> {
+fn build_questions(metrics: &[Metric], with_context: bool) -> HashMap<String, JevQuestion<'_>> {
+    let instructions = |text: &str| {
+        if with_context {
+            format!("{CONTEXT_PREAMBLE}\n\n{text}")
+        } else {
+            text.to_string()
+        }
+    };
     let mut questions = HashMap::new();
     for metric in metrics {
         let (question_type, criteria) = match metric.metric_type {
@@ -174,7 +189,7 @@ fn build_questions(metrics: &[Metric]) -> HashMap<String, JevQuestion<'_>> {
             metric.id.clone(),
             JevQuestion {
                 question_type,
-                instructions: &metric.question,
+                instructions: instructions(&metric.question),
                 criteria,
             },
         );
@@ -184,7 +199,7 @@ fn build_questions(metrics: &[Metric]) -> HashMap<String, JevQuestion<'_>> {
                 metric.applicability_id(),
                 JevQuestion {
                     question_type: "noul",
-                    instructions: condition,
+                    instructions: instructions(condition),
                     criteria: None,
                 },
             );
@@ -326,7 +341,7 @@ mod tests {
     #[test]
     fn rubrics_become_criteria_and_conditions_become_nouls() {
         let profile = load_profile("quality").unwrap();
-        let questions = build_questions(&profile.metrics);
+        let questions = build_questions(&profile.metrics, false);
         let request = serde_json::to_value(&questions).unwrap();
 
         let naming = &request["naming_clarity"];

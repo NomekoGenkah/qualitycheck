@@ -350,6 +350,7 @@ fn run_of(files: &[(&str, f64, bool)]) -> ScanRunResult {
                 relative_path: path.to_string(),
                 served_from_cache: false,
                 usage: None,
+                context_files: Vec::new(),
                 profiles: vec![ProfileEvaluation {
                     profile_name: "quality".to_string(),
                     composite_score: *composite,
