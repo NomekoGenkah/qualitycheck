@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::cache::{CachedMetricResult, JevUsage, RawMetricValue};
 use crate::error::JevError;
-use crate::profile::{Metric, MetricType};
+use crate::profile::{Metric, MetricType, Rubric};
 
 #[derive(Debug, Clone)]
 pub struct JevClient {
@@ -20,7 +20,7 @@ pub struct JevClient {
 struct JevRequest<'a> {
     model: &'a str,
     state: &'a str,
-    questions: HashMap<&'a str, JevQuestion<'a>>,
+    questions: HashMap<String, JevQuestion<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,41 +58,10 @@ impl JevClient {
             });
         }
 
-        let mut questions = HashMap::new();
-        for metric in metrics {
-            let (q_type, criteria) = match metric.metric_type {
-                MetricType::Scale => {
-                    let levels: Vec<String> = (metric.scale_min_level()..=metric.scale_max_level())
-                        .map(|i| i.to_string())
-                        .collect();
-                    ("score", Some(serde_json::to_value(levels).unwrap_or(Value::Null)))
-                }
-                MetricType::Enum => {
-                    let mut map = serde_json::Map::new();
-                    if let Some(opts) = &metric.options {
-                        for opt in opts {
-                            map.insert(opt.clone(), Value::String(opt.clone()));
-                        }
-                    }
-                    ("choice", Some(Value::Object(map)))
-                }
-                MetricType::Binary => ("noul", None),
-            };
-
-            questions.insert(
-                metric.id.as_str(),
-                JevQuestion {
-                    question_type: q_type,
-                    instructions: &metric.question,
-                    criteria,
-                },
-            );
-        }
-
         let request_body = JevRequest {
             model: "jev-latest",
             state: file_content,
-            questions,
+            questions: build_questions(metrics),
         };
 
         let mut headers = HeaderMap::new();
@@ -145,6 +114,13 @@ impl JevClient {
 
             let metric_res = parse_answer(answer_val, metric)?;
             results.insert(metric.id.clone(), metric_res);
+
+            if metric.applies_when.is_some() {
+                let applicability_id = metric.applicability_id();
+                let answer_val = extract_metric_answer(&response_json, &applicability_id)
+                    .ok_or_else(|| JevError::MissingMetricAnswer(applicability_id.clone()))?;
+                results.insert(applicability_id.clone(), parse_binary(answer_val, &applicability_id)?);
+            }
         }
 
         Ok(JevEvaluationResult {
@@ -155,6 +131,66 @@ impl JevClient {
             },
         })
     }
+}
+
+/// One question per metric, plus a yes/no question for each metric's `applies_when`. They all
+/// share the file as state and are answered independently in the same request.
+fn build_questions(metrics: &[Metric]) -> HashMap<String, JevQuestion<'_>> {
+    let mut questions = HashMap::new();
+    for metric in metrics {
+        let (question_type, criteria) = match metric.metric_type {
+            MetricType::Scale => {
+                let levels: Vec<String> = match &metric.rubric {
+                    Some(Rubric::Levels(levels)) => levels.clone(),
+                    _ => (metric.scale_min_level()..=metric.scale_max_level())
+                        .map(|i| i.to_string())
+                        .collect(),
+                };
+                ("score", Some(serde_json::json!(levels)))
+            }
+            MetricType::Enum => {
+                let described = |opt: &String| match &metric.rubric {
+                    Some(Rubric::Descriptions(map)) => map.get(opt).cloned().unwrap_or_else(|| opt.clone()),
+                    _ => opt.clone(),
+                };
+                let map: serde_json::Map<String, Value> = metric
+                    .options
+                    .iter()
+                    .flatten()
+                    .map(|opt| (opt.clone(), Value::String(described(opt))))
+                    .collect();
+                ("choice", Some(Value::Object(map)))
+            }
+            MetricType::Binary => {
+                let criteria = match &metric.rubric {
+                    Some(Rubric::Descriptions(map)) => Some(serde_json::json!(map)),
+                    _ => None,
+                };
+                ("noul", criteria)
+            }
+        };
+
+        questions.insert(
+            metric.id.clone(),
+            JevQuestion {
+                question_type,
+                instructions: &metric.question,
+                criteria,
+            },
+        );
+
+        if let Some(condition) = &metric.applies_when {
+            questions.insert(
+                metric.applicability_id(),
+                JevQuestion {
+                    question_type: "noul",
+                    instructions: condition,
+                    criteria: None,
+                },
+            );
+        }
+    }
+    questions
 }
 
 #[derive(Debug, Clone)]
@@ -237,45 +273,79 @@ fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevE
                 confidence: confidence.clamp(0.0, 1.0),
             })
         }
-        MetricType::Binary => {
-            // Noul answers can be:
-            // 1. { "noul": 0.05 } (calibrated probability of TRUE)
-            // 2. { "value": false, "confidence": 0.95 }
-            // 3. raw boolean: false
-            // 4. raw float: 0.05
-            if let Some(b) = val.get("value").and_then(|v| v.as_bool()) {
-                let conf = val.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                return Ok(CachedMetricResult {
-                    value: RawMetricValue::Binary(b),
-                    confidence: conf.clamp(0.0, 1.0),
-                });
-            }
+        MetricType::Binary => parse_binary(val, &metric.id),
+    }
+}
 
-            if let Some(b) = val.as_bool() {
-                return Ok(CachedMetricResult {
-                    value: RawMetricValue::Binary(b),
-                    confidence: 1.0,
-                });
-            }
+fn parse_binary(val: &Value, id: &str) -> Result<CachedMetricResult, JevError> {
+    // Noul answers can be:
+    // 1. { "noul": 0.05 } (calibrated probability of TRUE)
+    // 2. { "value": false, "confidence": 0.95 }
+    // 3. raw boolean: false
+    // 4. raw float: 0.05
+    if let Some(b) = val.get("value").and_then(|v| v.as_bool()) {
+        let conf = val.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        return Ok(CachedMetricResult {
+            value: RawMetricValue::Binary(b),
+            confidence: conf.clamp(0.0, 1.0),
+        });
+    }
 
-            let prob = if let Some(p) = val.get("noul").and_then(|v| v.as_f64()) {
-                p
-            } else if let Some(p) = val.as_f64() {
-                p
-            } else {
-                return Err(JevError::InvalidResponse(format!(
-                    "Missing or invalid boolean/noul for binary metric '{}': {:?}",
-                    metric.id, val
-                )));
-            };
+    if let Some(b) = val.as_bool() {
+        return Ok(CachedMetricResult {
+            value: RawMetricValue::Binary(b),
+            confidence: 1.0,
+        });
+    }
 
-            // Jev calibrated probability: prob is probability statement is true. Nouls carry no
-            // confidence of their own; use Jev's Choice formula for two options, (2·p_max − 1),
-            // so a coin-flip answer scores 0 like a flat Choice/Score distribution does.
-            Ok(CachedMetricResult {
-                value: RawMetricValue::Binary(prob >= 0.5),
-                confidence: (2.0 * prob - 1.0).abs().clamp(0.0, 1.0),
-            })
-        }
+    let prob = if let Some(p) = val.get("noul").and_then(|v| v.as_f64()) {
+        p
+    } else if let Some(p) = val.as_f64() {
+        p
+    } else {
+        return Err(JevError::InvalidResponse(format!(
+            "Missing or invalid boolean/noul for binary question '{}': {:?}",
+            id, val
+        )));
+    };
+
+    // Jev calibrated probability: prob is probability statement is true. Nouls carry no
+    // confidence of their own; use Jev's Choice formula for two options, (2·p_max − 1),
+    // so a coin-flip answer scores 0 like a flat Choice/Score distribution does.
+    Ok(CachedMetricResult {
+        value: RawMetricValue::Binary(prob >= 0.5),
+        confidence: (2.0 * prob - 1.0).abs().clamp(0.0, 1.0),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::load_profile;
+
+    #[test]
+    fn rubrics_become_criteria_and_conditions_become_nouls() {
+        let profile = load_profile("quality").unwrap();
+        let questions = build_questions(&profile.metrics);
+        let request = serde_json::to_value(&questions).unwrap();
+
+        let naming = &request["naming_clarity"];
+        assert_eq!(naming["type"], "score");
+        assert_eq!(naming["criteria"].as_array().unwrap().len(), 5);
+        assert!(naming["criteria"][0].as_str().unwrap().starts_with("Most names are cryptic"));
+
+        assert_eq!(request["complexity_level"]["type"], "choice");
+        assert!(request["complexity_level"]["criteria"]["low"]
+            .as_str()
+            .unwrap()
+            .starts_with("Functions are short"));
+
+        assert_eq!(request["has_dead_code"]["type"], "noul");
+        assert!(request["has_dead_code"]["criteria"]["true"].is_string());
+
+        let applies = &request["naming_clarity:applies"];
+        assert_eq!(applies["type"], "noul");
+        assert!(applies["instructions"].as_str().unwrap().starts_with("The file declares"));
+        assert!(request.get("has_dead_code:applies").is_none());
     }
 }

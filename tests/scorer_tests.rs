@@ -15,6 +15,8 @@ fn test_normalize_scale_metric() {
         options: None,
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     assert_eq!(normalize_metric_score(&metric, &RawMetricValue::Scale(1.0)), 1.0);
@@ -32,6 +34,8 @@ fn test_normalize_scale_metric() {
         options: None,
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     assert_eq!(normalize_metric_score(&metric_10, &RawMetricValue::Scale(0.0)), 1.0);
@@ -50,6 +54,8 @@ fn test_normalize_binary_metric() {
         options: None,
         good_value: Some(false), // default for defect check
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     // false means no defect -> good (5.0)
@@ -66,6 +72,8 @@ fn test_normalize_binary_metric() {
         options: None,
         good_value: Some(true),
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     assert_eq!(normalize_metric_score(&metric_positive, &RawMetricValue::Binary(true)), 5.0);
@@ -88,6 +96,8 @@ fn test_normalize_enum_metric() {
         ]),
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     // Lower is better: low -> 5.0, critical -> 1.0
@@ -114,6 +124,8 @@ fn test_normalize_enum_metric() {
         ]),
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
 
     // Higher is better: poor -> 1.0, high -> 5.0
@@ -145,6 +157,8 @@ fn test_composite_score_calculation() {
                 options: None,
                 good_value: None,
                 score_map: None,
+                rubric: None,
+                applies_when: None,
             },
             Metric {
                 id: "has_dead_code".to_string(),
@@ -155,6 +169,8 @@ fn test_composite_score_calculation() {
                 options: None,
                 good_value: Some(false),
                 score_map: None,
+                rubric: None,
+                applies_when: None,
             },
             Metric {
                 id: "complexity_level".to_string(),
@@ -170,6 +186,8 @@ fn test_composite_score_calculation() {
                 ]),
                 good_value: None,
                 score_map: None,
+                rubric: None,
+                applies_when: None,
             },
         ],
     };
@@ -221,6 +239,8 @@ fn gating_profile(min_confidence: Option<f64>) -> Profile {
         options: None,
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     };
     Profile {
         schema: None,
@@ -283,4 +303,29 @@ fn test_profile_min_confidence_override() {
 
     let strict = evaluate_file_with_metrics(&[gating_profile(Some(0.95))], &low_conf);
     assert!(strict[0].inconclusive);
+}
+
+#[test]
+fn test_not_applicable_metric_is_excluded_from_composite() {
+    let mut profile = gating_profile(None);
+    profile.metrics[1].applies_when = Some("The file contains its own logic.".to_string());
+
+    let mut results = answers((4.0, 0.9), (1.0, 0.9));
+    results.insert(
+        "cohesion:applies".to_string(),
+        CachedMetricResult {
+            value: RawMetricValue::Binary(false),
+            confidence: 0.8,
+        },
+    );
+    let evals = evaluate_file_with_metrics(std::slice::from_ref(&profile), &results);
+    let cohesion = evals[0].metrics.iter().find(|m| m.metric_id == "cohesion").unwrap();
+    assert!(cohesion.not_applicable);
+    assert_eq!(evals[0].composite_score, 4.0);
+
+    // Judged applicable: it counts.
+    results.get_mut("cohesion:applies").unwrap().value = RawMetricValue::Binary(true);
+    let evals = evaluate_file_with_metrics(&[profile], &results);
+    assert!(!evals[0].metrics[1].not_applicable);
+    assert_eq!(evals[0].composite_score, 2.5);
 }

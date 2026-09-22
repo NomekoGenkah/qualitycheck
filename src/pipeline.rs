@@ -11,7 +11,7 @@ use crate::cache::{
 };
 use crate::error::{QualityCheckError, ScanError};
 use crate::jev_client::JevClient;
-use crate::profile::{compute_active_metrics_hash, Metric, Profile};
+use crate::profile::{compute_active_metrics_hash, Metric, Profile, Rubric};
 use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, SCORING_VERSION};
 
 /// Orquestación concurrente y cacheada del pipeline de evaluación de archivos.
@@ -221,11 +221,31 @@ pub struct ScanPreviewResult {
     pub files: Vec<FilePreview>,
 }
 
-pub fn estimate_file_tokens(file_bytes_len: usize, metric_count: usize) -> u64 {
+pub fn estimate_file_tokens(file_bytes_len: usize, metrics: &[Metric]) -> u64 {
     let baseline_system_prompt = 250u64;
-    let questions_tokens = (metric_count as u64) * 55;
-    let content_tokens = (file_bytes_len as f64 / 3.5).ceil() as u64;
-    baseline_system_prompt + questions_tokens + content_tokens
+    let questions_tokens: u64 = metrics.iter().map(estimate_question_tokens).sum();
+    baseline_system_prompt + questions_tokens + chars_to_tokens(file_bytes_len)
+}
+
+/// Question text (instructions and rubric) plus per-question framing, and the same again for
+/// the `applies_when` yes/no question when the metric has one.
+fn estimate_question_tokens(metric: &Metric) -> u64 {
+    const FRAMING_TOKENS: u64 = 30;
+    let rubric_len: usize = match &metric.rubric {
+        Some(Rubric::Levels(levels)) => levels.iter().map(String::len).sum(),
+        Some(Rubric::Descriptions(map)) => map.iter().map(|(k, v)| k.len() + v.len()).sum(),
+        None => 0,
+    };
+    let main_question = FRAMING_TOKENS + chars_to_tokens(metric.question.len() + rubric_len);
+    let applicability_question = metric
+        .applies_when
+        .as_ref()
+        .map_or(0, |condition| FRAMING_TOKENS + chars_to_tokens(condition.len()));
+    main_question + applicability_question
+}
+
+fn chars_to_tokens(len: usize) -> u64 {
+    (len as f64 / 3.5).ceil() as u64
 }
 
 pub fn run_preview_pipeline(
@@ -254,7 +274,7 @@ pub fn run_preview_pipeline(
             cached_count += 1;
             (0u64, 0.0f64)
         } else {
-            let tokens = estimate_file_tokens(file_bytes.len(), total_metrics);
+            let tokens = estimate_file_tokens(file_bytes.len(), &all_metrics);
             let cost = (tokens as f64 * 0.042) / 1_000_000.0;
             total_tokens += tokens;
             (tokens, cost)

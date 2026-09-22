@@ -8,27 +8,53 @@
       "id": "testability",
       "type": "scale",
       "range": [1, 5],
-      "question": "Is the code modular, loosely coupled, and easy to unit test?",
+      "question": "How easily can the logic in this file be unit tested in isolation? Delegating work to injected or clearly separable collaborators counts in favor of testability; a thin file that mostly delegates is easy to test.",
+      "rubric": [
+        "Logic is tangled with hard-wired I/O, global state, or concrete external services, so it cannot run without the real environment.",
+        "Most logic depends directly on concrete I/O or global state; testing it needs heavy mocking or elaborate setup.",
+        "Core logic can be tested, but some important paths are coupled to I/O, time, randomness, or global state.",
+        "Logic is mostly pure or receives its dependencies as parameters; only thin edges touch I/O directly.",
+        "Logic is pure or cleanly separated from I/O, with dependencies passed in, so every behavior can be tested with simple inputs."
+      ],
+      "applies_when": "The file contains its own executable logic (functions or methods with behavior), rather than only type declarations, constants, module wiring, or configuration.",
       "weight": 1.5
     },
     {
       "id": "edge_case_handling",
       "type": "scale",
       "range": [1, 5],
-      "question": "Are potential edge cases, boundaries, and empty/null states properly handled?",
+      "question": "Does the logic in this file handle the edge cases of the data it processes itself (empty, missing, null, zero, boundary, and oversized values)? Cases ruled out by types, guaranteed by callers, or handled by a component this file delegates to count as handled.",
+      "rubric": [
+        "Obvious edge cases such as empty collections, missing values, or zero would crash the code or produce wrong results.",
+        "Several common edge cases are unhandled and would likely cause errors or incorrect behavior.",
+        "Common edge cases are handled, but some boundary or unusual inputs are not considered.",
+        "Nearly all edge cases are handled or ruled out, with only rare or unlikely cases left implicit.",
+        "Every plausible edge case is handled explicitly or ruled out by types, and behavior at the boundaries is deliberate."
+      ],
+      "applies_when": "The file itself processes data values (collections, strings, numbers, or optional values), rather than only declaring types, wiring modules, or passing values straight through to other components.",
       "weight": 1.5
     },
     {
       "id": "has_unhandled_errors",
       "type": "binary",
-      "question": "Does the file ignore error returns or contain unhandled panics/exceptions?",
+      "question": "Does the file silently ignore errors or crash on failures that can actually happen at runtime?",
+      "rubric": {
+        "true": "Some realistic failure is silently discarded or crashes the program: ignored error results, empty catch blocks, or unwrap/panic/assert on failures that can really occur.",
+        "false": "Every realistic failure is handled, propagated to the caller, or deliberately ignored for an evident reason."
+      },
       "weight": 1.0
     },
     {
       "id": "defensive_coding",
       "type": "enum",
       "options": ["low", "adequate", "strong"],
-      "question": "How effectively does the code enforce preconditions and defensive checks?",
+      "question": "How well does the code in this file protect its own invariants, by checking the preconditions and state it depends on or by making invalid states unrepresentable through types?",
+      "rubric": {
+        "low": "Functions assume their inputs and state are valid without checks, so misuse leads to silent corruption or confusing failures.",
+        "adequate": "Key preconditions are checked or enforced by types, though some assumptions remain implicit.",
+        "strong": "Preconditions and invariants are consistently enforced by checks or types, and violations fail early with clear errors."
+      },
+      "applies_when": "The file contains its own executable logic (functions or methods with behavior), rather than only type declarations, constants, module wiring, or configuration.",
       "weight": 1.0
     }
   ]

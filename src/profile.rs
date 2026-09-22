@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,28 @@ use crate::error::ProfileError;
 pub const DEFAULT_QUALITY_JSON: &str = include_str!("../profiles/quality.json");
 pub const DEFAULT_SECURITY_JSON: &str = include_str!("../profiles/security.json");
 pub const DEFAULT_QA_JSON: &str = include_str!("../profiles/qa.json");
+
+pub const BUILTIN_PROFILES: [(&str, &str); 3] = [
+    ("quality", DEFAULT_QUALITY_JSON),
+    ("security", DEFAULT_SECURITY_JSON),
+    ("qa", DEFAULT_QA_JSON),
+];
+
+/// blake3 (over LF line endings) of every earlier release of the built-in profiles. `init`
+/// copies built-ins into the profiles directory, where they take precedence; a copy matching one
+/// of these was never edited by the user, so it must not shadow the current built-in.
+const SUPERSEDED_BUILTIN_HASHES: &[&str] = &[
+    // v0.1.0 quality, security, qa
+    "4e97c283cdb1cbdf6a62a0a95f44195ca19f76e5a8ca35c51289f96dd9a02d89",
+    "8d22a59f5d36a40642fb308522618e6089c1d50ee06dd5a0f0ab98ced2d6c07a",
+    "e9d4658f72e4ac8c68ed73420d8722d44e830ac02e0839e152da40881fa6be07",
+];
+
+/// True when `content` is an unmodified copy of an older built-in profile.
+pub fn is_superseded_builtin(content: &str) -> bool {
+    let hash = blake3::hash(content.replace("\r\n", "\n").as_bytes());
+    SUPERSEDED_BUILTIN_HASHES.contains(&hash.to_hex().as_str())
+}
 
 pub const PROFILE_SCHEMA_JSON: &str = r#"{
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -48,7 +70,14 @@ pub const PROFILE_SCHEMA_JSON: &str = r#"{
           "score_map": {
             "type": "object",
             "additionalProperties": { "type": "number" }
-          }
+          },
+          "rubric": {
+            "oneOf": [
+              { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 2 },
+              { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+            ]
+          },
+          "applies_when": { "type": "string", "minLength": 1 }
         },
         "allOf": [
           {
@@ -88,7 +117,26 @@ pub struct Metric {
     pub good_value: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_map: Option<HashMap<String, f64>>,
+    /// What each possible answer means, sent to Jev as the question's criteria.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric: Option<Rubric>,
+    /// A condition asked as a separate yes/no question over the same file; when Jev judges it
+    /// false, the metric is reported as not applicable and left out of the composite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies_when: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Rubric {
+    /// Scale metrics: one situation per level, lowest level first.
+    Levels(Vec<String>),
+    /// Enum metrics: one situation per option. Binary metrics: the `"true"` and `"false"` cases.
+    Descriptions(BTreeMap<String, String>),
+}
+
+/// Jev's Score primitive accepts between 2 and 10 levels.
+pub const MAX_SCALE_LEVELS: i64 = 10;
 
 impl Metric {
     /// Lowest integer level label of a scale metric (the label Jev's position 0 maps to).
@@ -99,6 +147,11 @@ impl Metric {
     /// Highest integer level label of a scale metric.
     pub fn scale_max_level(&self) -> i64 {
         self.range.map(|r| r[1] as i64).unwrap_or(5)
+    }
+
+    /// Key under which the `applies_when` answer is requested from Jev and cached.
+    pub fn applicability_id(&self) -> String {
+        format!("{}:applies", self.id)
     }
 }
 
@@ -162,6 +215,12 @@ impl Profile {
         }
 
         for metric in &self.metrics {
+            let invalid = |reason: String| ProfileError::InvalidMetric {
+                profile: source_name.to_string(),
+                metric_id: metric.id.clone(),
+                reason,
+            };
+
             if metric.weight < 0.0 {
                 return Err(ProfileError::InvalidMetric {
                     profile: source_name.to_string(),
@@ -187,6 +246,23 @@ impl Profile {
                             ),
                         });
                     }
+                    let level_count = metric.scale_max_level() - metric.scale_min_level() + 1;
+                    if !(2..=MAX_SCALE_LEVELS).contains(&level_count) {
+                        return Err(invalid(format!(
+                            "scale range {:?} yields {} levels; Jev accepts 2 to {}",
+                            range, level_count, MAX_SCALE_LEVELS
+                        )));
+                    }
+                    match &metric.rubric {
+                        None => {}
+                        Some(Rubric::Levels(levels)) if levels.len() as i64 == level_count => {}
+                        Some(_) => {
+                            return Err(invalid(format!(
+                                "scale rubric must be a list of exactly {} level descriptions, lowest first",
+                                level_count
+                            )));
+                        }
+                    }
                 }
                 MetricType::Enum => {
                     let options = metric.options.as_ref().ok_or_else(|| {
@@ -203,8 +279,15 @@ impl Profile {
                             reason: "enum metric must contain at least 2 options".to_string(),
                         });
                     }
+                    let expected: BTreeSet<&str> = options.iter().map(String::as_str).collect();
+                    check_description_keys(&metric.rubric, &expected, "one description per option")
+                        .map_err(invalid)?;
                 }
-                MetricType::Binary => {}
+                MetricType::Binary => {
+                    let expected = BTreeSet::from(["true", "false"]);
+                    check_description_keys(&metric.rubric, &expected, "\"true\" and \"false\" descriptions")
+                        .map_err(invalid)?;
+                }
             }
         }
 
@@ -216,6 +299,28 @@ impl Profile {
     }
 }
 
+fn check_description_keys(
+    rubric: &Option<Rubric>,
+    expected: &BTreeSet<&str>,
+    what: &str,
+) -> Result<(), String> {
+    match rubric {
+        None => Ok(()),
+        Some(Rubric::Descriptions(map))
+            if map.keys().map(String::as_str).collect::<BTreeSet<_>>() == *expected =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(format!(
+            "rubric must be an object with {}: {:?}",
+            what, expected
+        )),
+    }
+}
+
+/// Hashes what is sent to Jev for each metric, so cached answers are reused exactly when the
+/// questions are unchanged. Scoring policy (weight, good_value, score_map, thresholds) is left
+/// out: changing it re-scores cached answers locally instead of re-querying.
 pub fn compute_active_metrics_hash(profiles: &[Profile]) -> String {
     let mut canonical_entries: Vec<String> = Vec::new();
 
@@ -226,11 +331,10 @@ pub fn compute_active_metrics_hash(profiles: &[Profile]) -> String {
                 "metric_id": metric.id,
                 "type": metric.metric_type,
                 "question": metric.question,
-                "weight": metric.weight,
                 "range": metric.range,
                 "options": metric.options,
-                "good_value": metric.good_value,
-                "score_map": metric.score_map,
+                "rubric": metric.rubric,
+                "applies_when": metric.applies_when,
             });
             canonical_entries.push(serde_json::to_string(&entry).unwrap());
         }
@@ -265,16 +369,16 @@ pub fn load_profile(name: &str) -> Result<Profile, ProfileError> {
         if candidate_with_ext.exists() {
             let content = fs::read_to_string(&candidate_with_ext)
                 .map_err(|e| ProfileError::IoError(candidate_with_ext.clone(), e))?;
-            return Profile::validate_and_parse(&content, name);
+            if !is_superseded_builtin(&content) {
+                return Profile::validate_and_parse(&content, name);
+            }
         }
     }
 
     let normalized_name = name.trim_end_matches(".json");
-    match normalized_name {
-        "quality" => Profile::validate_and_parse(DEFAULT_QUALITY_JSON, "quality"),
-        "security" => Profile::validate_and_parse(DEFAULT_SECURITY_JSON, "security"),
-        "qa" => Profile::validate_and_parse(DEFAULT_QA_JSON, "qa"),
-        _ => Err(ProfileError::NotFound(name.to_string())),
+    match BUILTIN_PROFILES.iter().find(|(builtin, _)| *builtin == normalized_name) {
+        Some((builtin, content)) => Profile::validate_and_parse(content, builtin),
+        None => Err(ProfileError::NotFound(name.to_string())),
     }
 }
 
@@ -290,13 +394,7 @@ pub fn load_profiles_by_names(names: &[&str]) -> Result<Vec<Profile>, ProfileErr
 pub fn list_available_profiles() -> Vec<ProfileSummary> {
     let mut summaries = HashMap::new();
 
-    let defaults = [
-        ("quality", DEFAULT_QUALITY_JSON),
-        ("security", DEFAULT_SECURITY_JSON),
-        ("qa", DEFAULT_QA_JSON),
-    ];
-
-    for (name, content) in defaults {
+    for (name, content) in BUILTIN_PROFILES {
         if let Ok(profile) = Profile::validate_and_parse(content, name) {
             summaries.insert(
                 name.to_string(),
@@ -317,7 +415,8 @@ pub fn list_available_profiles() -> Vec<ProfileSummary> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() && path.extension().is_some_and(|ext| ext == "json")
-                    && let Ok(content) = fs::read_to_string(&path) {
+                    && let Ok(content) = fs::read_to_string(&path)
+                    && !is_superseded_builtin(&content) {
                         let file_stem = path
                             .file_stem()
                             .and_then(|s| s.to_str())

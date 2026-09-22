@@ -26,6 +26,8 @@ fn test_cache_key_invalidation_on_metric_change() {
             options: None,
             good_value: None,
             score_map: None,
+            rubric: None,
+            applies_when: None,
         }],
     };
 
@@ -44,6 +46,8 @@ fn test_cache_key_invalidation_on_metric_change() {
             options: None,
             good_value: None,
             score_map: None,
+            rubric: None,
+            applies_when: None,
         }],
     };
 
@@ -112,6 +116,8 @@ fn scale_metric(id: &str, range: [f64; 2]) -> Metric {
         options: None,
         good_value: None,
         score_map: None,
+        rubric: None,
+        applies_when: None,
     }
 }
 
@@ -125,6 +131,8 @@ fn binary_metric(id: &str) -> Metric {
         options: None,
         good_value: Some(false),
         score_map: None,
+        rubric: None,
+        applies_when: None,
     }
 }
 

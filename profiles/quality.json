@@ -8,27 +8,53 @@
       "id": "naming_clarity",
       "type": "scale",
       "range": [1, 5],
-      "question": "Do variable and function names communicate their purpose clearly?",
+      "question": "How clearly do the names of the functions, types, and variables declared in this file communicate their purpose?",
+      "rubric": [
+        "Most names are cryptic, misleading, or single letters outside tiny scopes; a reader must study the implementation to guess what things are for.",
+        "Many names are vague (data, tmp, handle, doStuff) or inconsistent, so intent is often unclear without reading the body.",
+        "Names are mostly understandable, but several are generic, abbreviated, or don't match what the code actually does.",
+        "Nearly every name describes its purpose clearly, with only a few vague or inconsistent spots.",
+        "Every name states its role precisely and consistently; the code reads without comments explaining what things are."
+      ],
+      "applies_when": "The file declares its own named functions, methods, types, or variables, rather than consisting only of module declarations, re-exports, imports, or plain data and configuration.",
       "weight": 1.0
     },
     {
       "id": "has_dead_code",
       "type": "binary",
-      "question": "Does the file contain dead, commented-out, or unreachable code?",
+      "question": "Does the file contain dead code?",
+      "rubric": {
+        "true": "The file contains commented-out code blocks, unreachable statements, or private functions or variables that are never used. Public items that other files may use do not count.",
+        "false": "All code in the file is reachable, and every private item is used somewhere in the file."
+      },
       "weight": 0.5
     },
     {
       "id": "complexity_level",
       "type": "enum",
       "options": ["low", "medium", "high", "critical"],
-      "question": "What is the perceived cyclomatic complexity level of the file?",
+      "question": "How complex is the control flow of the code in this file?",
+      "rubric": {
+        "low": "Functions are short and straightforward, with little nesting and few branches.",
+        "medium": "Some functions have several branches or loops, or two to three levels of nesting, but each is still easy to follow.",
+        "high": "Several functions have deep nesting, long branch chains, or many interacting conditions that make them hard to follow.",
+        "critical": "Control flow is tangled: very long functions with deeply nested, interdependent conditions that are hard to reason about or change safely."
+      },
       "weight": 1.5
     },
     {
       "id": "cohesion",
       "type": "scale",
       "range": [1, 5],
-      "question": "Does the file exhibit strong cohesion and single responsibility?",
+      "question": "How focused is this file on a single responsibility? Work the file delegates to other components counts as outside its responsibility, not against it.",
+      "rubric": [
+        "The file mixes many unrelated responsibilities (for example I/O, business rules, formatting, and configuration) with no clear central purpose.",
+        "The file has a main purpose but also carries several unrelated concerns that belong elsewhere.",
+        "The file mostly serves one purpose, with one or two parts that would fit better in another module.",
+        "Everything in the file serves one clear purpose, apart from at most a small, loosely related helper.",
+        "The file has one sharply defined responsibility and every element directly supports it."
+      ],
+      "applies_when": "The file contains its own logic or definitions (functions, methods, or types), rather than consisting only of module declarations, re-exports, or plain data and configuration.",
       "weight": 1.0
     }
   ]

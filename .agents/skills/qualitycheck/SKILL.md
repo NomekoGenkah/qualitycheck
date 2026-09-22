@@ -101,8 +101,8 @@ When refactoring code to improve quality:
 
 Built-in profiles:
 - **`quality`** (default): Evaluates `naming_clarity`, `has_dead_code`, `complexity_level`, and `cohesion`. Default pass threshold: **3.0 / 5.0**.
-- **`security`**: Evaluates `hardcoded_secrets`, `input_sanitization`, and `safe_dependencies`. Default pass threshold: **3.5 / 5.0**.
-- **`qa`**: Evaluates `testability`, `edge_case_coverage`, and `error_handling_robustness`. Default pass threshold: **3.0 / 5.0**.
+- **`security`**: Evaluates `hardcoded_secrets`, `input_validation`, `injection_risk`, and `safe_error_handling`. Default pass threshold: **3.5 / 5.0**.
+- **`qa`**: Evaluates `testability`, `edge_case_handling`, `has_unhandled_errors`, and `defensive_coding`. Default pass threshold: **3.0 / 5.0**.
 
 Combine profiles with commas:
 ```bash
@@ -115,8 +115,10 @@ qualitycheck scan src/ --profile quality,security --format json
 
 - `0`: Scan succeeded and all files met thresholds (or running in informational mode without `--strict`).
 - `1`: Strict mode failure (`--strict`) — one or more files scored below the profile's `fail_below` threshold.
-
-Metrics with `"excluded_low_confidence": true` were answered with confidence below the profile's
-`min_confidence` and do not count toward `composite_score`; don't treat them as findings. A profile
-with `"inconclusive": true` had every metric excluded and was not judged.
 - `2`: Configuration or usage error (e.g. missing API key, invalid profile).
+
+Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition doesn't hold for the
+file, e.g. input validation in a file that receives no external input) or
+`"excluded_low_confidence": true` (answered below the profile's `min_confidence`) do not count toward
+`composite_score`; don't treat them as findings. A profile with `"inconclusive": true` had every
+metric excluded and was not judged.

@@ -24,6 +24,10 @@ pub struct MetricEvaluation {
     /// does not count toward the composite score.
     #[serde(default)]
     pub excluded_low_confidence: bool,
+    /// The metric's `applies_when` condition was judged false for this file, so it is reported
+    /// but does not count toward the composite score.
+    #[serde(default)]
+    pub not_applicable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,8 +38,8 @@ pub struct ProfileEvaluation {
     #[serde(default)]
     pub min_confidence: f64,
     pub passed: bool,
-    /// Every metric was excluded for low confidence: `composite_score` is then computed over
-    /// all metrics for reference only, and the profile passes without being judged.
+    /// Every metric was excluded (low confidence or not applicable): `composite_score` is then
+    /// computed over all metrics for reference only, and the profile passes without being judged.
     #[serde(default)]
     pub inconclusive: bool,
     pub metrics: Vec<MetricEvaluation>,
@@ -175,9 +179,13 @@ pub fn evaluate_file_with_metrics(
                 let normalized = normalize_metric_score(metric, &cached.value);
                 let weight = if metric.weight > 0.0 { metric.weight } else { 1.0 };
                 let excluded_low_confidence = cached.confidence < min_confidence;
+                let not_applicable = matches!(
+                    metric_results.get(&metric.applicability_id()).map(|a| &a.value),
+                    Some(RawMetricValue::Binary(false))
+                );
 
                 everything.add(normalized, weight);
-                if !excluded_low_confidence {
+                if !excluded_low_confidence && !not_applicable {
                     confident.add(normalized, weight);
                 }
 
@@ -191,6 +199,7 @@ pub fn evaluate_file_with_metrics(
                     normalized_score: normalized,
                     range: metric.range,
                     excluded_low_confidence,
+                    not_applicable,
                 });
             }
         }

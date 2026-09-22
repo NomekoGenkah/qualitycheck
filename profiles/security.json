@@ -7,28 +7,54 @@
     {
       "id": "hardcoded_secrets",
       "type": "binary",
-      "question": "Does the file contain hardcoded secrets, credentials, tokens, or keys?",
+      "question": "Does the file contain hardcoded secrets?",
+      "rubric": {
+        "true": "The file contains a literal real-looking credential: an API key, token, password, private key, or a connection string with embedded credentials.",
+        "false": "The file contains no literal secrets. Credentials come from the environment, configuration, or a secret store, and any placeholder or test value is obviously fake."
+      },
       "weight": 2.0
     },
     {
       "id": "input_validation",
       "type": "enum",
       "options": ["poor", "fair", "good", "high"],
-      "question": "How robust is input validation and boundary checking?",
+      "question": "How well is untrusted input that this file receives directly validated before use? Passing input to a component responsible for validating it (a service, validator, schema, or framework layer) counts as validated; judge only what this file is responsible for.",
+      "rubric": {
+        "poor": "Untrusted input is used directly for sensitive operations with no validation of type, format, or bounds, and no validating component is involved.",
+        "fair": "Some input is checked or delegated, but important fields, types, sizes, or ranges are used without any validation.",
+        "good": "Input is validated here or handed to a validating component before use, with only minor gaps such as a missing length limit.",
+        "high": "All untrusted input is validated for type, format, size, and range, here or by a dedicated validator, before any use, and invalid input is rejected explicitly."
+      },
+      "applies_when": "The file itself receives untrusted external input, such as HTTP request data, command-line arguments, file or environment contents, network messages, or user-supplied values, rather than only receiving values from its own program's callers.",
       "weight": 1.5
     },
     {
       "id": "injection_risk",
       "type": "enum",
       "options": ["none", "low", "medium", "high"],
-      "question": "What is the perceived risk of injection attacks (SQL, command, XSS, path traversal)?",
+      "question": "How exposed is this file to injection attacks (SQL, shell command, path traversal, or markup/XSS)?",
+      "rubric": {
+        "none": "Interpreted strings are built only from constants, or exclusively through parameterized queries, argument lists, path-safe APIs, or auto-escaping templates.",
+        "low": "External data reaches interpreted strings only through safe APIs, with at most a minor spot relying on earlier validation instead of escaping.",
+        "medium": "Some interpreted strings are assembled by concatenating or formatting external data with partial or inconsistent escaping.",
+        "high": "External data is concatenated or formatted directly into SQL, shell commands, file paths, or markup without escaping or parameterization."
+      },
+      "applies_when": "The file builds SQL queries, shell commands, file paths, HTML or other markup, or similar interpreted strings from data that could come from outside the program.",
       "weight": 1.5
     },
     {
       "id": "safe_error_handling",
       "type": "scale",
       "range": [1, 5],
-      "question": "Does error handling avoid leaking sensitive internal details or stack traces?",
+      "question": "Do errors produced or reported by this file keep sensitive internal details (stack traces, queries, file system paths, credentials) away from end users and external callers?",
+      "rubric": [
+        "Errors expose raw internals such as stack traces, queries, file paths, or secrets directly to users or external callers.",
+        "Several error paths return raw internal error messages that could reveal sensitive details to users or callers.",
+        "Most errors are wrapped in controlled messages, but some paths pass raw underlying messages through to users or callers.",
+        "Errors reach users and callers as controlled messages; internal details stay in internal logs, with at most a minor exception.",
+        "Every error path returns a deliberate, non-sensitive message, and internal details never cross the trust boundary."
+      ],
+      "applies_when": "The file sends error information across a trust boundary: to remote clients, other users, or external services (for example HTTP responses, API error payloads, or messages shown to users of a hosted service). Errors printed to the local operator running a command-line tool, or returned to calling code in the same program, do not count.",
       "weight": 1.0
     }
   ]

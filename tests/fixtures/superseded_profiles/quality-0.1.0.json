@@ -1,0 +1,35 @@
+{
+  "$schema": "https://qualitycheck.dev/schema/profile-v1.json",
+  "name": "quality",
+  "description": "Overall code readability, maintainability, and structure",
+  "fail_below": 3.0,
+  "metrics": [
+    {
+      "id": "naming_clarity",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Do variable and function names communicate their purpose clearly?",
+      "weight": 1.0
+    },
+    {
+      "id": "has_dead_code",
+      "type": "binary",
+      "question": "Does the file contain dead, commented-out, or unreachable code?",
+      "weight": 0.5
+    },
+    {
+      "id": "complexity_level",
+      "type": "enum",
+      "options": ["low", "medium", "high", "critical"],
+      "question": "What is the perceived cyclomatic complexity level of the file?",
+      "weight": 1.5
+    },
+    {
+      "id": "cohesion",
+      "type": "scale",
+      "range": [1, 5],
+      "question": "Does the file exhibit strong cohesion and single responsibility?",
+      "weight": 1.0
+    }
+  ]
+}

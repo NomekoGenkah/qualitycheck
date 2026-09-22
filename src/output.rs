@@ -78,7 +78,7 @@ pub fn print_scan_result(
                         );
 
                         let colored_line = if colors_enabled {
-                            if metric.excluded_low_confidence {
+                            if metric.excluded_low_confidence || metric.not_applicable {
                                 colorize(&metric_line, "90")
                             } else if metric.normalized_score >= 4.0 {
                                 colorize(&metric_line, "32")
@@ -186,7 +186,7 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                     );
 
                     let colored_line = if colors_enabled {
-                        if metric.excluded_low_confidence {
+                        if metric.excluded_low_confidence || metric.not_applicable {
                             colorize(&line, "90")
                         } else if metric.normalized_score >= 4.0 {
                             colorize(&line, "32")
@@ -203,7 +203,7 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
 
                 let comp_str = format!("Composite score: {:.1}/5", profile.composite_score);
                 let status_str = if profile.inconclusive {
-                    "INCONCLUSIVE: every metric below min confidence"
+                    "INCONCLUSIVE: no metric was applicable with enough confidence"
                 } else if profile.passed {
                     "PASS"
                 } else {
@@ -240,7 +240,11 @@ pub fn filter_gaps(run: &ScanRunResult) -> ScanRunResult {
                 let failing_metrics: Vec<MetricEvaluation> = profile
                     .metrics
                     .iter()
-                    .filter(|m| !m.excluded_low_confidence && m.normalized_score < profile.fail_below)
+                    .filter(|m| {
+                        !m.excluded_low_confidence
+                            && !m.not_applicable
+                            && m.normalized_score < profile.fail_below
+                    })
                     .cloned()
                     .collect();
 
@@ -508,7 +512,9 @@ fn format_metric_display(metric: &MetricEvaluation) -> String {
 }
 
 fn excluded_suffix(metric: &MetricEvaluation, min_confidence: f64) -> String {
-    if metric.excluded_low_confidence {
+    if metric.not_applicable {
+        " [excluded: not applicable to this file]".to_string()
+    } else if metric.excluded_low_confidence {
         format!(
             " [excluded: below {}% min conf.]",
             (min_confidence * 100.0).round() as u64

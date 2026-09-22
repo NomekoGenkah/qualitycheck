@@ -118,7 +118,9 @@ fn test_cli_scan_with_mock_jev_server() {
                         "naming_clarity": { "score": 3.0, "confidence": 0.87 },
                         "has_dead_code": { "noul": 0.05 },
                         "complexity_level": { "choice": "low", "confidence": 0.95 },
-                        "cohesion": { "score": 3.5, "confidence": 0.90 }
+                        "cohesion": { "score": 3.5, "confidence": 0.90 },
+                        "naming_clarity:applies": { "noul": 0.97 },
+                        "cohesion:applies": { "noul": 0.97 }
                     }
                 })
                 .to_string();
@@ -245,7 +247,9 @@ fn test_cli_scan_strict_mode_exit_code() {
                         "naming_clarity": { "score": 0.0, "confidence": 0.95 },
                         "has_dead_code": { "noul": 0.95 }, // true -> dead code present -> score 1.0
                         "complexity_level": { "choice": "critical", "confidence": 0.95 }, // critical -> score 1.0
-                        "cohesion": { "score": 0.0, "confidence": 0.95 }
+                        "cohesion": { "score": 0.0, "confidence": 0.95 },
+                        "naming_clarity:applies": { "noul": 0.97 },
+                        "cohesion:applies": { "noul": 0.97 }
                     }
                 })
                 .to_string();
@@ -396,7 +400,9 @@ fn test_cli_patch_command() {
                         "naming_clarity": { "score": 3.5, "confidence": 0.9 },
                         "has_dead_code": { "noul": 0.01 },
                         "complexity_level": { "choice": "low", "confidence": 0.95 },
-                        "cohesion": { "score": 3.5, "confidence": 0.9 }
+                        "cohesion": { "score": 3.5, "confidence": 0.9 },
+                        "naming_clarity:applies": { "noul": 0.97 },
+                        "cohesion:applies": { "noul": 0.97 }
                     }
                 })
                 .to_string();
@@ -685,7 +691,9 @@ fn test_cli_scan_excludes_low_confidence_metrics() {
                 "naming_clarity": { "score": 3.0, "confidence": 0.87 },
                 "has_dead_code": { "noul": 0.05 },
                 "complexity_level": { "choice": "medium", "confidence": 0.9 },
-                "cohesion": { "score": 0.0, "confidence": 0.05 }
+                "cohesion": { "score": 0.0, "confidence": 0.05 },
+                "naming_clarity:applies": { "noul": 0.97 },
+                "cohesion:applies": { "noul": 0.97 }
             }
         }),
         5,
@@ -719,4 +727,80 @@ fn test_cli_scan_excludes_low_confidence_metrics() {
             "cohesion: 1/5 (5% conf.) [excluded: below 20% min conf.]",
         ))
         .stdout(predicate::str::contains("has_dead_code: false (90% conf.)"));
+}
+
+#[test]
+fn test_cli_unedited_installed_profile_is_upgraded_but_edited_one_is_kept() {
+    let tmp_config = tempdir().unwrap();
+    let profiles_dir = tmp_config.path().join("profiles");
+    fs::create_dir_all(&profiles_dir).unwrap();
+    // Copies installed by v0.1.0's `init`: one untouched, one edited by the user.
+    fs::write(
+        profiles_dir.join("quality.json"),
+        include_str!("fixtures/superseded_profiles/quality-0.1.0.json"),
+    )
+    .unwrap();
+    let edited_security = include_str!("fixtures/superseded_profiles/security-0.1.0.json")
+        .replace("\"fail_below\": 3.5", "\"fail_below\": 4.2");
+    fs::write(profiles_dir.join("security.json"), &edited_security).unwrap();
+
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("qualitycheck").unwrap();
+        cmd.env("QUALITYCHECK_CONFIG_DIR", tmp_config.path()).args(args);
+        cmd.assert()
+    };
+
+    // The stale copy no longer shadows the built-in, even before anything rewrites it.
+    run(&["profiles", "show", "quality"])
+        .success()
+        .stdout(predicate::str::contains("\"rubric\""));
+    run(&["profiles", "show", "security"])
+        .success()
+        .stdout(predicate::str::contains("4.2"))
+        .stdout(predicate::str::contains("\"rubric\"").not());
+
+    // Installing defaults refreshes the stale copy on disk and leaves the edited one alone.
+    run(&["init", "--api-key", "k", "--non-interactive"]).success();
+    let quality_on_disk = fs::read_to_string(profiles_dir.join("quality.json")).unwrap();
+    assert!(quality_on_disk.contains("\"rubric\""));
+    assert_eq!(
+        fs::read_to_string(profiles_dir.join("security.json")).unwrap(),
+        edited_security
+    );
+}
+
+#[test]
+fn test_cli_scan_excludes_not_applicable_metrics() {
+    // A module-declaration file: Jev judges naming and cohesion not applicable.
+    let mock_url = spawn_mock_jev(
+        serde_json::json!({
+            "answers": {
+                "naming_clarity": { "score": 0.0, "confidence": 0.9 },
+                "naming_clarity:applies": { "noul": 0.04 },
+                "has_dead_code": { "noul": 0.02 },
+                "complexity_level": { "choice": "low", "confidence": 0.95 },
+                "cohesion": { "score": 0.0, "confidence": 0.9 },
+                "cohesion:applies": { "noul": 0.06 }
+            }
+        }),
+        5,
+    );
+
+    let tmp_repo = tempdir().unwrap();
+    fs::write(tmp_repo.path().join("lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
+    let tmp_config = tempdir().unwrap();
+
+    Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(tmp_repo.path())
+        .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+        .env("JEV_API_KEY", "test_key")
+        .env("JEV_API_URL", &mock_url)
+        .args(["scan", ".", "--strict", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "naming_clarity: 1/5 (90% conf.) [excluded: not applicable to this file]",
+        ))
+        .stdout(predicate::str::contains("Composite score: quality 5.0/5"));
 }

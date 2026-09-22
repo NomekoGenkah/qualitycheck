@@ -147,7 +147,8 @@ qualitycheck describe
 
 ## Profiles Data Model
 
-Profiles are stored in JSON (built into the binary and copied to `~/.config/qualitycheck/profiles/`):
+Profiles are stored in JSON (built into the binary and copied to `~/.config/qualitycheck/profiles/`,
+where you can edit them; unedited copies are refreshed when a new release improves the built-ins):
 
 ```json
 {
@@ -158,33 +159,46 @@ Profiles are stored in JSON (built into the binary and copied to `~/.config/qual
   "min_confidence": 0.2,
   "metrics": [
     {
-      "id": "naming_clarity",
+      "id": "cohesion",
       "type": "scale",
       "range": [1, 5],
-      "question": "Do variable and function names communicate their purpose clearly?",
+      "question": "How focused is this file on a single responsibility? ...",
+      "rubric": [
+        "The file mixes many unrelated responsibilities ...",
+        "The file has a main purpose but also carries several unrelated concerns ...",
+        "The file mostly serves one purpose, with one or two parts that would fit better elsewhere.",
+        "Everything in the file serves one clear purpose, apart from at most a small helper.",
+        "The file has one sharply defined responsibility and every element directly supports it."
+      ],
+      "applies_when": "The file contains its own logic or definitions, rather than only module declarations ...",
       "weight": 1.0
-    },
-    {
-      "id": "has_dead_code",
-      "type": "binary",
-      "question": "Does the file contain dead, commented-out, or unreachable code?",
-      "weight": 0.5
     },
     {
       "id": "complexity_level",
       "type": "enum",
       "options": ["low", "medium", "high", "critical"],
-      "question": "What is the perceived cyclomatic complexity level of the file?",
+      "question": "How complex is the control flow of the code in this file?",
+      "rubric": { "low": "Functions are short and straightforward ...", "medium": "...", "high": "...", "critical": "..." },
       "weight": 1.5
     }
   ]
 }
 ```
 
-`min_confidence` (optional, default `0.2`) excludes metrics Jev answered with near-flat probability
-from the composite score: they are still reported, flagged `excluded_low_confidence`. If every metric
-of a profile is excluded, the profile is reported `inconclusive` and does not fail `--strict`. It is
-scoring policy only, so changing it never invalidates the cache.
+- `rubric` (optional) describes each possible answer as a concrete situation: one entry per level
+  for `scale` (lowest first), one per option for `enum`, and `"true"`/`"false"` for `binary`. Jev
+  answers far more decisively against described situations than against bare labels.
+- `applies_when` (optional) is asked as a separate yes/no question over the same file. When it
+  doesn't hold, the metric is reported `not_applicable` and left out of the composite, so a
+  controller that delegates validation isn't scored on validation it doesn't own.
+- `min_confidence` (optional, default `0.2`) excludes metrics Jev answered with near-flat probability
+  from the composite score: they are still reported, flagged `excluded_low_confidence`. If every
+  metric of a profile is excluded, the profile is reported `inconclusive` and does not fail `--strict`.
+- `scale` ranges may span 2 to 10 levels (Jev's limit).
+
+Scoring policy (`weight`, `fail_below`, `min_confidence`, `good_value`, `score_map`) is not part of the
+cache key: changing it re-scores cached answers without new API calls. Changing a `question`,
+`rubric`, or `applies_when` re-queries.
 
 ---
 

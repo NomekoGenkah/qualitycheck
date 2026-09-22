@@ -109,16 +109,13 @@ pub fn install_default_profiles() -> Result<usize, std::io::Error> {
 
     fs::create_dir_all(&profiles_dir)?;
 
-    let defaults = [
-        ("quality.json", crate::profile::DEFAULT_QUALITY_JSON),
-        ("security.json", crate::profile::DEFAULT_SECURITY_JSON),
-        ("qa.json", crate::profile::DEFAULT_QA_JSON),
-    ];
-
     let mut installed_count = 0;
-    for (filename, content) in defaults {
-        let target = profiles_dir.join(filename);
-        if !target.exists() {
+    for (name, content) in crate::profile::BUILTIN_PROFILES {
+        let target = profiles_dir.join(format!("{name}.json"));
+        // Refresh unedited copies of older built-ins; never touch profiles the user changed.
+        let is_stale_copy = fs::read_to_string(&target)
+            .is_ok_and(|existing| crate::profile::is_superseded_builtin(&existing));
+        if !target.exists() || is_stale_copy {
             fs::write(&target, content)?;
             installed_count += 1;
         }
