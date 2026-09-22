@@ -464,6 +464,12 @@ pub fn print_preview_result(
                 "Total files: {} ({} uncached, {} cached)",
                 preview.total_files, preview.uncached_files, preview.cached_files
             );
+            if preview.skipped_non_source_files > 0 {
+                println!(
+                    "Skipped: {} non-source file(s) (--all-files to include)",
+                    preview.skipped_non_source_files
+                );
+            }
 
             let summary_tokens = format!(
                 "Est. tokens: ~{} input tokens · Est. cost: ~${:.5} USD",

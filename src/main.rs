@@ -160,9 +160,12 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
         include: args.include,
         exclude: args.exclude,
         max_file_size_kb: args.max_file_size,
+        all_files: args.all_files,
     };
 
-    let files = collect_files_from_targets(&targets, &walker_opts)?;
+    let collected = collect_files_from_targets(&targets, &walker_opts)?;
+    report_skipped_non_source(collected.skipped_non_source);
+    let files = collected.files;
     if files.is_empty() {
         eprintln!("No candidate files found to scan in '{}'.", targets_label);
         return Ok(0);
@@ -189,7 +192,8 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
     }
 
     if args.preview {
-        let preview = run_preview_pipeline_on_inputs(&target_path, &inputs, &profiles, &project_root, args.full)?;
+        let mut preview = run_preview_pipeline_on_inputs(&target_path, &inputs, &profiles, &project_root, args.full)?;
+        preview.skipped_non_source_files = collected.skipped_non_source;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }
@@ -262,11 +266,13 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         include: args.include,
         exclude: args.exclude,
         max_file_size_kb: args.max_file_size,
+        all_files: args.all_files,
     };
     let changed_paths: Vec<PathBuf> = changes.files.iter().map(|f| f.path.clone()).collect();
-    let eligible: HashSet<PathBuf> = filter_candidate_files(&changed_paths, &project_root, &walker_opts)?
-        .into_iter()
-        .collect();
+    let collected = filter_candidate_files(&changed_paths, &project_root, &walker_opts)?;
+    report_skipped_non_source(collected.skipped_non_source);
+    let skipped_non_source = collected.skipped_non_source;
+    let eligible: HashSet<PathBuf> = collected.files.into_iter().collect();
     let changed_files: Vec<ChangedFile> = changes
         .files
         .into_iter()
@@ -337,7 +343,8 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
                 ..input
             }
         }));
-        let preview = run_preview_pipeline_on_inputs(&project_root, &inputs, &profiles, &project_root, args.full)?;
+        let mut preview = run_preview_pipeline_on_inputs(&project_root, &inputs, &profiles, &project_root, args.full)?;
+        preview.skipped_non_source_files = skipped_non_source;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }
@@ -414,6 +421,15 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
     print_patch_delta_report(&report, output_format, args.no_color, saved_path.as_deref());
 
     Ok(if failed { 1 } else { 0 })
+}
+
+fn report_skipped_non_source(skipped: usize) {
+    if skipped > 0 {
+        eprintln!(
+            "Skipped {} file(s) that aren't source code (docs, config, vendored, minified, or generated); use --all-files to include them.",
+            skipped
+        );
+    }
 }
 
 fn combine_usage(a: &RunUsage, b: &RunUsage) -> RunUsage {

@@ -16,6 +16,7 @@ Welcome! This document provides AI coding agents (Claude Code, Cursor, OpenCode,
   - `src/cache.rs`: Blake3 content-addressed cache in `.qualitycheck/cache/`.
   - `src/context.rs`: Deterministic selection of related files sent as context (`--context`).
   - `src/git.rs`: Changed files and their base-revision content for `patch`.
+  - `src/walker.rs`: File discovery, including the default source-code filter (`--all-files` disables it).
   - `src/pipeline.rs`: Concurrent scanning pipeline & offline token pre-estimation (`--preview`).
   - `src/scorer.rs`: Metric normalization and weighted composite aggregation.
   - `src/storage.rs`: Historical run persistence under `.qualitycheck/runs/`.

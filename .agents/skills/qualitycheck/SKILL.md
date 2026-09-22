@@ -34,6 +34,9 @@ qualitycheck scan <path> --preview
 - Cache hits consume **0 tokens** ($0.00).
 - Uncached files display an estimated token count and projected USD cost.
 - `--preview` is completely offline and does not require an API key or make network requests.
+- Directory scans and `patch` score only source code: docs, config, lockfiles, vendored, minified,
+  and generated files are skipped (the count is reported as `skipped_non_source_files` and on
+  stderr). Name a file explicitly, or pass `--all-files`, to score other files.
 
 ### 2. Prefer Git Patch Scans for Incremental Changes
 When working in a Git repository with uncommitted or branch changes, **do not scan the entire codebase**. Use `patch`:
@@ -108,8 +111,8 @@ changed file against its base version in one run. To compare arbitrary points in
 
 | Command | Purpose | Key Flags |
 |---|---|---|
-| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--context`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
-| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--context`, `--preview`, `--strict`, `--format <table\|json>` |
+| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
+| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json>` |
 | `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck diff <RUN-A> <RUN-B>` | Compare two historical runs for score deltas | `--format <table\|json>` |

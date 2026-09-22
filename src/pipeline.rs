@@ -283,6 +283,9 @@ pub struct ScanPreviewResult {
     pub total_estimated_tokens: u64,
     pub total_estimated_cost_usd: f64,
     pub is_full: bool,
+    /// Files passed over for not being source code (set by the caller; see `--all-files`).
+    #[serde(default)]
+    pub skipped_non_source_files: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_uncached: Vec<FilePreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -429,6 +432,7 @@ pub fn run_preview_pipeline_on_inputs(
         total_estimated_tokens: total_tokens,
         total_estimated_cost_usd: total_cost,
         is_full: full,
+        skipped_non_source_files: 0,
         top_uncached,
         files: files_to_include,
     })

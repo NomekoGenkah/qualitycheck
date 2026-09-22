@@ -114,6 +114,11 @@ pub struct ScanArgs {
     /// Costs more tokens per file
     #[arg(long)]
     pub context: bool,
+
+    /// Score every text file, not only source code. By default, files without a source-code
+    /// extension, vendored directories, and minified or generated files are skipped
+    #[arg(long)]
+    pub all_files: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -189,6 +194,11 @@ pub struct PatchArgs {
     /// Costs more tokens per file
     #[arg(long)]
     pub context: bool,
+
+    /// Score every text file, not only source code. By default, files without a source-code
+    /// extension, vendored directories, and minified or generated files are skipped
+    #[arg(long)]
+    pub all_files: bool,
 }
 
 #[derive(Args, Debug, Clone)]
