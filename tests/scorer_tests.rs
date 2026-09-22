@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use qualitycheck::cache::{CachedMetricResult, RawMetricValue};
 use qualitycheck::profile::{Metric, MetricType, Profile};
-use qualitycheck::scorer::{evaluate_file_with_metrics, normalize_metric_score};
+use qualitycheck::scorer::{
+    evaluate_file_with_metrics, find_regressions, normalize_metric_score, FileEvaluation,
+    ProfileEvaluation, RegressionKind, RunUsage, ScanRunResult, SCORING_VERSION,
+};
 
 #[test]
 fn test_normalize_scale_metric() {
@@ -328,4 +331,81 @@ fn test_not_applicable_metric_is_excluded_from_composite() {
     let evals = evaluate_file_with_metrics(&[profile], &results);
     assert!(!evals[0].metrics[1].not_applicable);
     assert_eq!(evals[0].composite_score, 2.5);
+}
+
+/// A run with one "quality" profile (fail_below 3.0) per file: (path, composite, inconclusive).
+fn run_of(files: &[(&str, f64, bool)]) -> ScanRunResult {
+    ScanRunResult {
+        scoring_version: SCORING_VERSION,
+        run_id: "r".to_string(),
+        timestamp: chrono::Utc::now(),
+        target_path: ".".to_string(),
+        total_files: files.len(),
+        cached_files: 0,
+        profiles_used: vec!["quality".to_string()],
+        files: files
+            .iter()
+            .map(|(path, composite, inconclusive)| FileEvaluation {
+                path: path.into(),
+                relative_path: path.to_string(),
+                served_from_cache: false,
+                usage: None,
+                profiles: vec![ProfileEvaluation {
+                    profile_name: "quality".to_string(),
+                    composite_score: *composite,
+                    fail_below: 3.0,
+                    min_confidence: 0.2,
+                    passed: *inconclusive || *composite >= 3.0,
+                    inconclusive: *inconclusive,
+                    metrics: Vec::new(),
+                }],
+            })
+            .collect(),
+        usage: RunUsage::default(),
+        passed: true,
+        exit_reason: None,
+    }
+}
+
+#[test]
+fn test_find_regressions_reports_only_what_the_change_made_worse() {
+    let base = run_of(&[
+        ("dropped.rs", 4.5, false),
+        ("within_allowance.rs", 4.5, false),
+        ("already_low.rs", 2.0, false),
+        ("was_inconclusive.rs", 4.0, true),
+    ]);
+    let head = run_of(&[
+        ("dropped.rs", 3.8, false),
+        ("within_allowance.rs", 4.0, false),
+        ("already_low.rs", 1.9, false),
+        ("was_inconclusive.rs", 2.5, false),
+        ("new_low.rs", 2.9, false),
+        ("new_ok.rs", 3.1, false),
+        ("new_inconclusive.rs", 1.0, true),
+    ]);
+
+    let regressions = find_regressions(&base, &head, 0.5);
+    let found: Vec<(&str, RegressionKind)> = regressions
+        .iter()
+        .map(|r| (r.relative_path.as_str(), r.kind))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("dropped.rs", RegressionKind::Dropped),
+            ("was_inconclusive.rs", RegressionKind::BelowThresholdWithoutBase),
+            ("new_low.rs", RegressionKind::BelowThresholdWithoutBase),
+        ]
+    );
+    assert_eq!(regressions[0].old_composite, Some(4.5));
+    assert_eq!(regressions[0].new_composite, 3.8);
+
+    // A drop exactly equal to the allowance is allowed; zero allowance flags any drop.
+    assert!(find_regressions(&base, &head, 0.7)
+        .iter()
+        .all(|r| r.relative_path != "dropped.rs"));
+    assert!(find_regressions(&base, &head, 0.0)
+        .iter()
+        .any(|r| r.relative_path == "already_low.rs"));
 }

@@ -247,3 +247,63 @@ impl WeightedSum {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionKind {
+    /// The composite dropped by more than the allowed amount versus the base.
+    Dropped,
+    /// No judged base to compare against (new file, or the base was inconclusive), and the new
+    /// version scores below the profile's `fail_below`.
+    BelowThresholdWithoutBase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Regression {
+    pub relative_path: String,
+    pub profile_name: String,
+    pub kind: RegressionKind,
+    pub old_composite: Option<f64>,
+    pub new_composite: f64,
+    pub fail_below: f64,
+}
+
+/// Regressions introduced by a change: judged profiles whose composite dropped by more than
+/// `max_drop` from the base, and profiles with no judged base that fall below `fail_below`.
+/// Scores that were already low at the base are deliberately not reported.
+pub fn find_regressions(base: &ScanRunResult, head: &ScanRunResult, max_drop: f64) -> Vec<Regression> {
+    let mut regressions = Vec::new();
+    for file in &head.files {
+        let base_file = base.files.iter().find(|f| f.relative_path == file.relative_path);
+        for profile in file.profiles.iter().filter(|p| !p.inconclusive) {
+            let base_profile = base_file
+                .and_then(|f| f.profiles.iter().find(|p| p.profile_name == profile.profile_name))
+                .filter(|p| !p.inconclusive);
+
+            let kind = match base_profile {
+                Some(base_profile) => {
+                    let drop = round_to_tenth(base_profile.composite_score - profile.composite_score);
+                    (drop > max_drop).then_some(RegressionKind::Dropped)
+                }
+                None => (!profile.passed).then_some(RegressionKind::BelowThresholdWithoutBase),
+            };
+
+            if let Some(kind) = kind {
+                regressions.push(Regression {
+                    relative_path: file.relative_path.clone(),
+                    profile_name: profile.profile_name.clone(),
+                    kind,
+                    old_composite: base_profile.map(|p| p.composite_score),
+                    new_composite: profile.composite_score,
+                    fail_below: profile.fail_below,
+                });
+            }
+        }
+    }
+    regressions
+}
+
+/// Composites are reported to one decimal; compare differences at that precision too.
+pub fn round_to_tenth(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}

@@ -45,6 +45,16 @@ qualitycheck patch --format json
 qualitycheck patch --base main --format json
 ```
 
+To tell whether a low score was introduced by the change or predates it, don't scan the base
+revision by hand: `--delta` scores each changed file at the base as well and reports score changes,
+and `--fail-on-regression <POINTS>` exits 1 only for drops larger than POINTS or poor new files:
+```bash
+qualitycheck patch --base main --fail-on-regression 0.5 --format json
+```
+In the JSON report, `regressions` lists what the change made worse (`kind`: `dropped` or
+`below_threshold_without_base`); `file_diffs` has composite and metric deltas per changed file
+(`old_composite` is `null` for files without a base version).
+
 ### 3. Always Use Structured JSON for Parsing
 Always pass `--format json` so the output can be parsed directly without ANSI escape sequences:
 ```bash
@@ -86,7 +96,7 @@ When refactoring code to improve quality:
 | Command | Purpose | Key Flags |
 |---|---|---|
 | `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
-| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--preview`, `--strict`, `--format <table\|json>` |
+| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--preview`, `--strict`, `--format <table\|json>` |
 | `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck diff <RUN-A> <RUN-B>` | Compare two historical runs for score deltas | `--format <table\|json>` |

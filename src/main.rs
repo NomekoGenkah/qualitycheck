@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,16 +15,21 @@ use qualitycheck::config::{
     resolve_jev_url,
 };
 use qualitycheck::error::{ConfigError, QualityCheckError, ScanError};
-use qualitycheck::git::{find_repo_root, get_changed_files};
+use qualitycheck::git::{find_repo_root, get_changed_files, ChangedFile};
 use qualitycheck::jev_client::JevClient;
 use qualitycheck::output::{
     diff_runs, filter_gaps, list_saved_runs, load_saved_run, persist_run_result,
-    print_diff_report, print_file_evaluation, print_preview_result, print_scan_result, OutputFormat,
+    print_diff_report, print_file_evaluation, print_patch_delta_report, print_preview_result,
+    print_scan_result, OutputFormat, PatchDeltaReport,
 };
-use qualitycheck::pipeline::run_preview_pipeline;
+use qualitycheck::pipeline::{
+    run_preview_pipeline, run_preview_pipeline_on_inputs, run_scan_pipeline_on_inputs, ScanInput,
+};
 use qualitycheck::profile::{list_available_profiles, load_profile, load_profiles_by_names};
-use qualitycheck::scorer::run_scan_pipeline;
-use qualitycheck::walker::{collect_files_from_targets, filter_candidate_files, WalkerOptions};
+use qualitycheck::scorer::{find_regressions, run_scan_pipeline, RunUsage};
+use qualitycheck::walker::{
+    collect_files_from_targets, filter_candidate_files, is_content_eligible, WalkerOptions,
+};
 
 #[tokio::main]
 async fn main() {
@@ -231,12 +237,19 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
 }
 
 async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
+    if args.fail_on_regression.is_some_and(|max_drop| max_drop < 0.0) {
+        return Err(QualityCheckError::Usage(
+            "--fail-on-regression must be zero or positive".to_string(),
+        ));
+    }
+    let compare_base = args.delta || args.fail_on_regression.is_some();
+
     let target_path = args.path.clone();
     let project_root = find_repo_root(&target_path)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let changed_files = get_changed_files(&project_root, args.base.as_deref())?;
+    let changes = get_changed_files(&project_root, args.base.as_deref())?;
 
     let walker_opts = WalkerOptions {
         no_ignore: false,
@@ -244,7 +257,15 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         exclude: args.exclude,
         max_file_size_kb: args.max_file_size,
     };
-    let changed_files = filter_candidate_files(&changed_files, &project_root, &walker_opts)?;
+    let changed_paths: Vec<PathBuf> = changes.files.iter().map(|f| f.path.clone()).collect();
+    let eligible: HashSet<PathBuf> = filter_candidate_files(&changed_paths, &project_root, &walker_opts)?
+        .into_iter()
+        .collect();
+    let changed_files: Vec<ChangedFile> = changes
+        .files
+        .into_iter()
+        .filter(|f| eligible.contains(&f.path))
+        .collect();
 
     if changed_files.is_empty() {
         eprintln!("No changed files detected to scan.");
@@ -265,8 +286,42 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         _ => OutputFormat::Table,
     };
 
+    let head_inputs: Vec<ScanInput> = changed_files
+        .iter()
+        .map(|f| ScanInput::from_disk(f.path.clone()))
+        .collect();
+    // Each file's base version is scored under its current path so the two sides line up; a
+    // base that is binary, empty, or oversized counts as no base.
+    let base_inputs: Vec<ScanInput> = if compare_base {
+        changed_files
+            .into_iter()
+            .filter_map(|f| {
+                let content = f
+                    .base_content
+                    .filter(|bytes| is_content_eligible(bytes, args.max_file_size))?;
+                Some(ScanInput {
+                    path: f.path,
+                    content: Some(content),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     if args.preview {
-        let preview = run_preview_pipeline(&project_root, &changed_files, &profiles, &project_root, args.full)?;
+        // Base versions are labelled for display only; their content is already in memory.
+        let base_label = format!(" (at {})", changes.base);
+        let mut inputs = head_inputs;
+        inputs.extend(base_inputs.into_iter().map(|input| {
+            let mut labelled = input.path.into_os_string();
+            labelled.push(&base_label);
+            ScanInput {
+                path: PathBuf::from(labelled),
+                content: input.content,
+            }
+        }));
+        let preview = run_preview_pipeline_on_inputs(&project_root, &inputs, &profiles, &project_root, args.full)?;
         print_preview_result(&preview, output_format, args.no_color);
         return Ok(0);
     }
@@ -277,24 +332,30 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
     let jev_url = resolve_jev_url();
     let client = Arc::new(JevClient::new(api_key, jev_url));
 
+    let base_note = if compare_base {
+        format!(", plus {} base versions", base_inputs.len())
+    } else {
+        String::new()
+    };
     eprintln!(
-        "Patch scan ({} changed files vs {})...",
-        changed_files.len(),
-        args.base.as_deref().unwrap_or("working tree")
+        "Patch scan ({} changed files vs {}{})...",
+        head_inputs.len(),
+        changes.base,
+        base_note
     );
 
-    let scan_result = run_scan_pipeline(
+    let head_result = run_scan_pipeline_on_inputs(
         &project_root,
-        &changed_files,
+        head_inputs,
         &profiles,
-        client,
+        Arc::clone(&client),
         args.concurrency,
         &project_root,
     )
     .await?;
 
     let saved_path = persist_run_result(
-        &scan_result,
+        &head_result,
         args.save.as_deref(),
         args.no_persist,
         &project_root,
@@ -302,13 +363,50 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
     .ok()
     .flatten();
 
-    print_scan_result(&scan_result, output_format, args.no_color, saved_path.as_deref());
+    let strict_failed = args.strict && !head_result.passed;
 
-    if args.strict && !scan_result.passed {
-        return Ok(1);
+    if !compare_base {
+        print_scan_result(&head_result, output_format, args.no_color, saved_path.as_deref());
+        return Ok(if strict_failed { 1 } else { 0 });
     }
 
-    Ok(0)
+    let base_result = run_scan_pipeline_on_inputs(
+        &project_root,
+        base_inputs,
+        &profiles,
+        client,
+        args.concurrency,
+        &project_root,
+    )
+    .await?;
+
+    let regressions = args
+        .fail_on_regression
+        .map(|max_drop| find_regressions(&base_result, &head_result, max_drop))
+        .unwrap_or_default();
+    let failed = strict_failed || !regressions.is_empty();
+
+    let report = PatchDeltaReport {
+        base: changes.base,
+        head_run_id: head_result.run_id.clone(),
+        max_regression: args.fail_on_regression,
+        passed: !failed,
+        regressions,
+        file_diffs: diff_runs(&base_result, &head_result).file_diffs,
+        usage: combine_usage(&base_result.usage, &head_result.usage),
+    };
+    print_patch_delta_report(&report, output_format, args.no_color, saved_path.as_deref());
+
+    Ok(if failed { 1 } else { 0 })
+}
+
+fn combine_usage(a: &RunUsage, b: &RunUsage) -> RunUsage {
+    RunUsage {
+        input_tokens: a.input_tokens + b.input_tokens,
+        output_tokens: a.output_tokens + b.output_tokens,
+        total_tokens: a.total_tokens + b.total_tokens,
+        estimated_cost_usd: a.estimated_cost_usd + b.estimated_cost_usd,
+    }
 }
 
 fn handle_gaps(args: GapsArgs) -> Result<i32, QualityCheckError> {

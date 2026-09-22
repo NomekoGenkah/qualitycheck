@@ -203,6 +203,14 @@ fn is_file_eligible(path: &Path, max_file_size_kb: u64) -> bool {
     true
 }
 
+/// The in-memory counterpart of the size, emptiness, and binary checks applied to files on disk.
+pub fn is_content_eligible(bytes: &[u8], max_file_size_kb: u64) -> bool {
+    let sniff_len = bytes.len().min(8192);
+    !bytes.is_empty()
+        && (bytes.len() as u64) <= max_file_size_kb * 1024
+        && !bytes[..sniff_len].contains(&0)
+}
+
 pub fn is_binary_file(path: &Path) -> bool {
     let mut file = match fs::File::open(path) {
         Ok(f) => f,

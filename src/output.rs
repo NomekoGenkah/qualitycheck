@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::RawMetricValue;
 use crate::pipeline::ScanPreviewResult;
-use crate::scorer::{FileEvaluation, MetricEvaluation, ScanRunResult};
+use crate::scorer::{
+    round_to_tenth, FileEvaluation, MetricEvaluation, Regression, RegressionKind, RunUsage,
+    ScanRunResult,
+};
 
 pub use crate::storage::{get_runs_dir, list_saved_runs, load_saved_run, persist_run_result, RunListItem};
 
@@ -16,27 +19,44 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Scores are `None` on the old side when the file, profile, or metric didn't exist there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricDiff {
     pub metric_id: String,
-    pub old_score: f64,
+    pub old_score: Option<f64>,
     pub new_score: f64,
-    pub delta: f64,
+    pub delta: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileDiff {
     pub profile_name: String,
-    pub old_composite: f64,
+    pub old_composite: Option<f64>,
     pub new_composite: f64,
-    pub delta: f64,
+    pub delta: Option<f64>,
     pub metric_diffs: Vec<MetricDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
     pub relative_path: String,
+    /// The file has no counterpart in the old run.
+    pub is_new: bool,
     pub profile_diffs: Vec<ProfileDiff>,
+}
+
+/// `patch --delta`: every changed file scored at the base and in the working tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchDeltaReport {
+    pub base: String,
+    pub head_run_id: String,
+    /// `--fail-on-regression` allowance, when gating was requested.
+    pub max_regression: Option<f64>,
+    pub passed: bool,
+    pub regressions: Vec<Regression>,
+    pub file_diffs: Vec<FileDiff>,
+    /// Tokens for both sides combined.
+    pub usage: RunUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,9 +311,9 @@ pub fn diff_runs(run_a: &ScanRunResult, run_b: &ScanRunResult) -> RunDiffReport 
                 fa.profiles.iter().find(|p| p.profile_name == prof_b.profile_name)
             });
 
-            let old_comp = prof_a_opt.map(|p| p.composite_score).unwrap_or(0.0);
+            let old_comp = prof_a_opt.map(|p| p.composite_score);
             let new_comp = prof_b.composite_score;
-            let comp_delta = ((new_comp - old_comp) * 10.0).round() / 10.0;
+            let comp_delta = old_comp.map(|old| round_to_tenth(new_comp - old));
 
             let mut metric_diffs = Vec::new();
             for m_b in &prof_b.metrics {
@@ -301,9 +321,10 @@ pub fn diff_runs(run_a: &ScanRunResult, run_b: &ScanRunResult) -> RunDiffReport 
                     pa.metrics.iter().find(|m| m.metric_id == m_b.metric_id)
                 });
 
-                let old_m_score = m_a_opt.map(|m| m.normalized_score).unwrap_or(0.0);
-                let new_m_score = m_b.normalized_score;
-                let delta = ((new_m_score - old_m_score) * 10.0).round() / 10.0;
+                // Rounded to the displayed precision so old, new, and delta always agree.
+                let old_m_score = m_a_opt.map(|m| round_to_tenth(m.normalized_score));
+                let new_m_score = round_to_tenth(m_b.normalized_score);
+                let delta = old_m_score.map(|old| round_to_tenth(new_m_score - old));
 
                 metric_diffs.push(MetricDiff {
                     metric_id: m_b.metric_id.clone(),
@@ -324,6 +345,7 @@ pub fn diff_runs(run_a: &ScanRunResult, run_b: &ScanRunResult) -> RunDiffReport 
 
         file_diffs.push(FileDiff {
             relative_path: file_b.relative_path.clone(),
+            is_new: file_a_opt.is_none(),
             profile_diffs,
         });
     }
@@ -346,34 +368,7 @@ pub fn print_diff_report(report: &RunDiffReport, format: OutputFormat, no_color:
             println!("Comparing runs: {} -> {}", report.old_run_id, report.new_run_id);
             println!();
 
-            for file_diff in &report.file_diffs {
-                println!("{}", file_diff.relative_path);
-                for prof_diff in &file_diff.profile_diffs {
-                    let symbol = if prof_diff.delta > 0.0 { "+" } else { "" };
-                    let line = format!(
-                        "  [{}] composite: {:.1} -> {:.1} ({}{:.1})",
-                        prof_diff.profile_name,
-                        prof_diff.old_composite,
-                        prof_diff.new_composite,
-                        symbol,
-                        prof_diff.delta
-                    );
-
-                    let colored_line = if colors_enabled {
-                        if prof_diff.delta > 0.0 {
-                            colorize(&line, "32")
-                        } else if prof_diff.delta < 0.0 {
-                            colorize(&line, "31")
-                        } else {
-                            line
-                        }
-                    } else {
-                        line
-                    };
-                    println!("{}", colored_line);
-                }
-                println!();
-            }
+            print_file_diffs(&report.file_diffs, colors_enabled);
         }
     }
 }
@@ -508,6 +503,114 @@ fn format_metric_display(metric: &MetricEvaluation) -> String {
         }
         RawMetricValue::Enum(s) => s.clone(),
         RawMetricValue::Binary(b) => b.to_string(),
+    }
+}
+
+/// Per-file composite changes, plus each metric whose score moved.
+fn print_file_diffs(file_diffs: &[FileDiff], colors_enabled: bool) {
+    let paint = |line: String, delta: Option<f64>| match delta {
+        Some(d) if colors_enabled && d > 0.0 => colorize(&line, "32"),
+        Some(d) if colors_enabled && d < 0.0 => colorize(&line, "31"),
+        _ => line,
+    };
+
+    for file_diff in file_diffs {
+        if file_diff.is_new {
+            println!("{} (new)", file_diff.relative_path);
+        } else {
+            println!("{}", file_diff.relative_path);
+        }
+
+        for prof_diff in &file_diff.profile_diffs {
+            let line = format!(
+                "  [{}] composite: {}",
+                prof_diff.profile_name,
+                format_score_change(prof_diff.old_composite, prof_diff.new_composite, prof_diff.delta)
+            );
+            println!("{}", paint(line, prof_diff.delta));
+
+            for metric in prof_diff.metric_diffs.iter().filter(|m| m.delta.is_some_and(|d| d != 0.0)) {
+                let line = format!(
+                    "      {}: {}",
+                    metric.metric_id,
+                    format_score_change(metric.old_score, metric.new_score, metric.delta)
+                );
+                println!("{}", paint(line, metric.delta));
+            }
+        }
+        println!();
+    }
+}
+
+fn format_score_change(old: Option<f64>, new: f64, delta: Option<f64>) -> String {
+    match (old, delta) {
+        (Some(old), Some(delta)) => {
+            let sign = if delta > 0.0 { "+" } else { "" };
+            format!("{:.1} -> {:.1} ({}{:.1})", old, new, sign, delta)
+        }
+        _ => format!("{:.1} (no base)", new),
+    }
+}
+
+pub fn print_patch_delta_report(
+    report: &PatchDeltaReport,
+    format: OutputFormat,
+    no_color: bool,
+    saved_path: Option<&Path>,
+) {
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let colors_enabled = !no_color && io::stdout().is_terminal();
+            let new_count = report.file_diffs.iter().filter(|f| f.is_new).count();
+            println!(
+                "Score changes vs {} ({} changed files, {} without a base version)",
+                report.base,
+                report.file_diffs.len(),
+                new_count
+            );
+            println!();
+            print_file_diffs(&report.file_diffs, colors_enabled);
+
+            if let Some(max_drop) = report.max_regression {
+                if report.regressions.is_empty() {
+                    let line = format!("No regressions (allowed drop: {:.1}).", max_drop);
+                    println!("{}", if colors_enabled { colorize(&line, "32") } else { line });
+                } else {
+                    let header = format!("Regressions (allowed drop: {:.1}):", max_drop);
+                    println!("{}", if colors_enabled { colorize(&header, "31;1") } else { header });
+                    for regression in &report.regressions {
+                        let detail = match (regression.kind, regression.old_composite) {
+                            (RegressionKind::Dropped, Some(old)) => format!(
+                                "{:.1} -> {:.1}",
+                                old, regression.new_composite
+                            ),
+                            _ => format!(
+                                "{:.1}, below {:.1} with no base to compare",
+                                regression.new_composite, regression.fail_below
+                            ),
+                        };
+                        println!(
+                            "  {} [{}]: {}",
+                            regression.relative_path, regression.profile_name, detail
+                        );
+                    }
+                }
+            }
+
+            let token_line = format!(
+                "Tokens consumed (base + working tree): {} input · {} output · Est. cost: ${:.5}",
+                report.usage.input_tokens, report.usage.output_tokens, report.usage.estimated_cost_usd
+            );
+            println!("{}", if colors_enabled { colorize(&token_line, "36") } else { token_line });
+
+            if let Some(path) = saved_path {
+                println!("✔ Working-tree report saved to {}", path.display());
+            }
+        }
     }
 }
 

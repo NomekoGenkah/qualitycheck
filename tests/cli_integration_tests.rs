@@ -804,3 +804,186 @@ fn test_cli_scan_excludes_not_applicable_metrics() {
         ))
         .stdout(predicate::str::contains("Composite score: quality 5.0/5"));
 }
+
+/// Serves Jev responses chosen from the evaluated file content (the request's `state`).
+fn spawn_content_aware_mock_jev(respond: fn(&str) -> serde_json::Value) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/v1/systemone", listener.local_addr().unwrap().port());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 8192];
+            let body_start = loop {
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                if n == 0 {
+                    break None;
+                }
+                request.extend_from_slice(&buffer[..n]);
+                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+            };
+            let Some(body_start) = body_start else { continue };
+            let headers = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+            let content_length: usize = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            while request.len() < body_start + content_length {
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[body_start..]).unwrap_or_default();
+            let state = body["state"].as_str().unwrap_or_default();
+            let response = respond(state).to_string();
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            let _ = stream.write_all(http_response.as_bytes());
+        }
+    });
+    url
+}
+
+/// Files containing "HIGH_QUALITY" score 4.8/5 on the quality profile; anything else 1.0/5.
+fn quality_by_marker(state: &str) -> serde_json::Value {
+    if state.contains("HIGH_QUALITY") {
+        serde_json::json!({ "answers": {
+            "naming_clarity": { "score": 3.5, "confidence": 0.9 },
+            "naming_clarity:applies": { "noul": 0.97 },
+            "has_dead_code": { "noul": 0.02 },
+            "complexity_level": { "choice": "low", "confidence": 0.95 },
+            "cohesion": { "score": 3.5, "confidence": 0.9 },
+            "cohesion:applies": { "noul": 0.97 }
+        }})
+    } else {
+        serde_json::json!({ "answers": {
+            "naming_clarity": { "score": 0.0, "confidence": 0.9 },
+            "naming_clarity:applies": { "noul": 0.97 },
+            "has_dead_code": { "noul": 0.97 },
+            "complexity_level": { "choice": "critical", "confidence": 0.95 },
+            "cohesion": { "score": 0.0, "confidence": 0.9 },
+            "cohesion:applies": { "noul": 0.97 }
+        }})
+    }
+}
+
+/// A repo committed with a good `controller.rs` and an already-poor `legacy.rs`.
+fn repo_with_quality_history() -> (tempfile::TempDir, git2::Repository) {
+    let tmp = tempdir().unwrap();
+    let repo = git2::Repository::init(tmp.path()).unwrap();
+    fs::write(tmp.path().join("controller.rs"), "// HIGH_QUALITY v1\npub fn handle() {}\n").unwrap();
+    fs::write(tmp.path().join("legacy.rs"), "// v1\npub fn x() {}\n").unwrap();
+    commit_all(&repo, "base");
+    (tmp, repo)
+}
+
+fn patch_cmd(root: &std::path::Path, config: &std::path::Path, url: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+    let mut cmd = Command::cargo_bin("qualitycheck").unwrap();
+    cmd.current_dir(root)
+        .env("QUALITYCHECK_CONFIG_DIR", config)
+        .env("JEV_API_KEY", "test_key")
+        .env("JEV_API_URL", url)
+        .arg("patch")
+        .args(args);
+    cmd.assert()
+}
+
+#[test]
+fn test_cli_patch_fail_on_regression_ignores_preexisting_low_scores() {
+    let url = spawn_content_aware_mock_jev(quality_by_marker);
+    let (tmp, _repo) = repo_with_quality_history();
+    let root = tmp.path();
+    let config = tempdir().unwrap();
+
+    // Controller stays good and legacy stays poor: the low score predates the change.
+    fs::write(root.join("controller.rs"), "// HIGH_QUALITY v2\npub fn handle() {}\n").unwrap();
+    fs::write(root.join("legacy.rs"), "// v2\npub fn x() {}\n").unwrap();
+
+    patch_cmd(root, config.path(), &url, &["--base", "HEAD", "--fail-on-regression", "0.5", "--no-color"])
+        .success()
+        .stdout(predicate::str::contains("Score changes vs HEAD (2 changed files, 0 without a base version)"))
+        .stdout(predicate::str::contains("[quality] composite: 1.0 -> 1.0 (0.0)"))
+        .stdout(predicate::str::contains("No regressions (allowed drop: 0.5)."));
+
+    // --strict alone would have failed on legacy.rs.
+    patch_cmd(root, config.path(), &url, &["--base", "HEAD", "--strict"]).code(1);
+}
+
+#[test]
+fn test_cli_patch_fail_on_regression_flags_drops_and_poor_new_files() {
+    let url = spawn_content_aware_mock_jev(quality_by_marker);
+    let (tmp, _repo) = repo_with_quality_history();
+    let root = tmp.path();
+    let config = tempdir().unwrap();
+
+    fs::write(root.join("controller.rs"), "// v2, rewritten badly\npub fn handle() {}\n").unwrap();
+    fs::write(root.join("legacy.rs"), "// v2\npub fn x() {}\n").unwrap();
+    fs::write(root.join("service.rs"), "// new\npub fn serve() {}\n").unwrap();
+
+    let assert = patch_cmd(
+        root,
+        config.path(),
+        &url,
+        &["--base", "HEAD", "--fail-on-regression", "0.5", "--format", "json"],
+    )
+    .code(1);
+    let report: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["base"], "HEAD");
+    let regressions: Vec<(String, String)> = report["regressions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["relative_path"].as_str().unwrap().to_string(), r["kind"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(
+        regressions,
+        vec![
+            ("controller.rs".to_string(), "dropped".to_string()),
+            ("service.rs".to_string(), "below_threshold_without_base".to_string()),
+        ]
+    );
+
+    let service = report["file_diffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["relative_path"] == "service.rs")
+        .unwrap();
+    assert_eq!(service["is_new"], true);
+    assert!(service["profile_diffs"][0]["old_composite"].is_null());
+
+    // The working-tree run is still saved for `gaps` and `file`.
+    assert!(root.join(".qualitycheck/runs/latest.json").exists());
+}
+
+#[test]
+fn test_cli_patch_delta_preview_counts_both_sides_offline() {
+    let (tmp, _repo) = repo_with_quality_history();
+    let root = tmp.path();
+    fs::write(root.join("controller.rs"), "// v2\npub fn handle() {}\n").unwrap();
+    fs::write(root.join("service.rs"), "// new\npub fn serve() {}\n").unwrap();
+    let config = tempdir().unwrap();
+
+    Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(root)
+        .env("QUALITYCHECK_CONFIG_DIR", config.path())
+        .env_remove("JEV_API_KEY")
+        .args(["patch", "--base", "HEAD", "--delta", "--preview", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_files\": 3"))
+        .stdout(predicate::str::contains("controller.rs (at HEAD)"))
+        .stdout(predicate::str::contains("service.rs (at HEAD)").not());
+}

@@ -14,10 +14,49 @@ use crate::jev_client::JevClient;
 use crate::profile::{compute_active_metrics_hash, Metric, Profile, Rubric};
 use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, SCORING_VERSION};
 
+/// A file to evaluate. `content`, when set, is evaluated instead of reading `path` — e.g. a
+/// file as it was at a base revision, reported under its current path.
+#[derive(Debug, Clone)]
+pub struct ScanInput {
+    pub path: PathBuf,
+    pub content: Option<Vec<u8>>,
+}
+
+impl ScanInput {
+    pub fn from_disk(path: PathBuf) -> Self {
+        Self { path, content: None }
+    }
+
+    fn into_bytes(self) -> Result<(PathBuf, Vec<u8>), QualityCheckError> {
+        match self.content {
+            Some(bytes) => Ok((self.path, bytes)),
+            None => {
+                let bytes = std::fs::read(&self.path).map_err(|e| {
+                    QualityCheckError::Scan(ScanError::FileReadError(self.path.clone(), e))
+                })?;
+                Ok((self.path, bytes))
+            }
+        }
+    }
+}
+
 /// Orquestación concurrente y cacheada del pipeline de evaluación de archivos.
 pub async fn run_scan_pipeline(
     target_path: &Path,
     file_paths: &[PathBuf],
+    profiles: &[Profile],
+    client: Arc<JevClient>,
+    concurrency: usize,
+    project_root: &Path,
+) -> Result<ScanRunResult, QualityCheckError> {
+    let inputs = file_paths.iter().cloned().map(ScanInput::from_disk).collect();
+    run_scan_pipeline_on_inputs(target_path, inputs, profiles, client, concurrency, project_root)
+        .await
+}
+
+pub async fn run_scan_pipeline_on_inputs(
+    target_path: &Path,
+    inputs: Vec<ScanInput>,
     profiles: &[Profile],
     client: Arc<JevClient>,
     concurrency: usize,
@@ -29,10 +68,9 @@ pub async fn run_scan_pipeline(
     let all_metrics = collect_unique_metrics(profiles);
 
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
-    let mut tasks = Vec::with_capacity(file_paths.len());
+    let mut tasks = Vec::with_capacity(inputs.len());
 
-    for file_path in file_paths {
-        let path = file_path.clone();
+    for input in inputs {
         let target_root = target_path.to_path_buf();
         let p_root = project_root.to_path_buf();
         let m_hash = metrics_hash.clone();
@@ -44,7 +82,7 @@ pub async fn run_scan_pipeline(
         tasks.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             evaluate_single_file(
-                &path,
+                input,
                 &target_root,
                 &p_root,
                 &m_hash,
@@ -126,7 +164,7 @@ fn collect_unique_metrics(profiles: &[Profile]) -> Vec<Metric> {
 }
 
 async fn evaluate_single_file(
-    path: &Path,
+    input: ScanInput,
     target_root: &Path,
     project_root: &Path,
     metrics_hash: &str,
@@ -134,9 +172,8 @@ async fn evaluate_single_file(
     profiles: &[Profile],
     client: &JevClient,
 ) -> Result<FileEvaluation, QualityCheckError> {
-    let file_bytes = std::fs::read(path)
-        .map_err(|e| QualityCheckError::Scan(ScanError::FileReadError(path.to_path_buf(), e)))?;
-
+    let (path, file_bytes) = input.into_bytes()?;
+    let path = path.as_path();
     let (cache_key, file_hash) = compute_cache_key(&file_bytes, metrics_hash);
 
     let (metric_results, served_from_cache, usage) = if let Some(mut cached) = get_cached_result(project_root, &cache_key) {
@@ -255,19 +292,39 @@ pub fn run_preview_pipeline(
     project_root: &Path,
     full: bool,
 ) -> Result<ScanPreviewResult, QualityCheckError> {
+    let inputs: Vec<ScanInput> = file_paths.iter().cloned().map(ScanInput::from_disk).collect();
+    run_preview_pipeline_on_inputs(target_path, &inputs, profiles, project_root, full)
+}
+
+pub fn run_preview_pipeline_on_inputs(
+    target_path: &Path,
+    inputs: &[ScanInput],
+    profiles: &[Profile],
+    project_root: &Path,
+    full: bool,
+) -> Result<ScanPreviewResult, QualityCheckError> {
     let metrics_hash = compute_active_metrics_hash(profiles);
     let all_metrics = collect_unique_metrics(profiles);
     let total_metrics = all_metrics.len();
 
-    let mut file_previews = Vec::with_capacity(file_paths.len());
+    let mut file_previews = Vec::with_capacity(inputs.len());
     let mut cached_count = 0;
     let mut total_tokens = 0u64;
 
-    for path in file_paths {
-        let file_bytes = std::fs::read(path)
-            .map_err(|e| QualityCheckError::Scan(ScanError::FileReadError(path.clone(), e)))?;
+    for input in inputs {
+        let path = &input.path;
+        let read_bytes;
+        let file_bytes: &[u8] = match &input.content {
+            Some(bytes) => bytes,
+            None => {
+                read_bytes = std::fs::read(path).map_err(|e| {
+                    QualityCheckError::Scan(ScanError::FileReadError(path.clone(), e))
+                })?;
+                &read_bytes
+            }
+        };
 
-        let (cache_key, _) = compute_cache_key(&file_bytes, &metrics_hash);
+        let (cache_key, _) = compute_cache_key(file_bytes, &metrics_hash);
         let in_cache = get_cached_result(project_root, &cache_key).is_some();
 
         let (est_tokens, est_cost) = if in_cache {

@@ -140,6 +140,16 @@ pub struct PatchArgs {
     #[arg(long)]
     pub strict: bool,
 
+    /// Also score each changed file as it was at the base and report per-file score changes
+    #[arg(long)]
+    pub delta: bool,
+
+    /// Exit code 1 if any changed file's composite drops by more than POINTS versus the base, or
+    /// a file with no base version scores below fail_below. Scores that were already low at the
+    /// base don't fail. Implies --delta
+    #[arg(long, value_name = "POINTS")]
+    pub fail_on_regression: Option<f64>,
+
     /// Additional inclusion glob pattern
     #[arg(long = "include")]
     pub include: Vec<String>,

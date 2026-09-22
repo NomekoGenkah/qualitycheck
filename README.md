@@ -102,7 +102,17 @@ qualitycheck patch
 
 # Scan changes relative to base branch (e.g. main)
 qualitycheck patch --base main --strict --format json
+
+# Score each changed file at the base too, and report per-file and per-metric score changes
+qualitycheck patch --base main --delta
+
+# Gate on regressions only: exit 1 if a changed file's composite drops by more than 0.5, or a
+# new file scores below its profile's fail_below. Files that were already low at the base pass.
+qualitycheck patch --base main --fail-on-regression 0.5
 ```
+
+With `--delta`, base versions go through the same content-addressed cache, so re-running after
+further edits only re-scores what changed. `--preview` includes the base versions in its estimate.
 
 ### 4. Triage & History
 
