@@ -49,8 +49,15 @@ pub struct FileEvaluation {
     pub profiles: Vec<ProfileEvaluation>,
 }
 
+/// Bumped whenever the same raw answers would produce different normalized scores, so runs
+/// scored under different rules aren't silently compared. Version 0 (legacy, field absent)
+/// under-scored every scale metric by one level.
+pub const SCORING_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanRunResult {
+    #[serde(default)]
+    pub scoring_version: u32,
     pub run_id: String,
     pub timestamp: DateTime<Utc>,
     pub target_path: String,

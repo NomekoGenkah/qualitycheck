@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use tempfile::tempdir;
 
 use qualitycheck::cache::{
-    compute_cache_key, get_cached_result, put_cached_result, CachedFileResult, CachedMetricResult,
-    RawMetricValue,
+    compute_cache_key, get_cached_result, put_cached_result, upgrade_cached_result,
+    CachedFileResult, CachedMetricResult, RawMetricValue, CACHE_FORMAT_VERSION,
 };
 use qualitycheck::profile::{compute_active_metrics_hash, Metric, MetricType, Profile};
 
@@ -81,6 +81,7 @@ fn test_cache_put_and_get() {
     );
 
     let result = CachedFileResult {
+        format_version: CACHE_FORMAT_VERSION,
         file_hash: "f_hash_123".to_string(),
         metrics_hash: "m_hash_456".to_string(),
         timestamp: chrono::Utc::now(),
@@ -97,4 +98,71 @@ fn test_cache_put_and_get() {
     assert_eq!(loaded.metrics.len(), 2);
     assert_eq!(loaded.metrics["naming_clarity"].value, RawMetricValue::Scale(4.0));
     assert_eq!(loaded.metrics["has_dead_code"].value, RawMetricValue::Binary(false));
+}
+
+fn scale_metric(id: &str, range: [f64; 2]) -> Metric {
+    Metric {
+        id: id.to_string(),
+        metric_type: MetricType::Scale,
+        question: "Q".to_string(),
+        weight: 1.0,
+        range: Some(range),
+        options: None,
+        good_value: None,
+        score_map: None,
+    }
+}
+
+#[test]
+fn test_legacy_cache_entry_scale_positions_are_upgraded() {
+    // Entries written before format_version existed stored Jev's 0-based level position.
+    let legacy_json = r#"{
+        "file_hash": "f",
+        "metrics_hash": "m",
+        "timestamp": "2026-09-21T17:31:26Z",
+        "metrics": {
+            "naming_clarity": { "value": 3.5, "confidence": 0.65 },
+            "zero_based": { "value": 2.0, "confidence": 0.9 },
+            "complexity_level": { "value": "medium", "confidence": 0.4 }
+        }
+    }"#;
+    let mut entry: CachedFileResult = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(entry.format_version, 0);
+
+    let metrics = vec![
+        scale_metric("naming_clarity", [1.0, 5.0]),
+        scale_metric("zero_based", [0.0, 4.0]),
+    ];
+    upgrade_cached_result(&mut entry, &metrics);
+
+    assert_eq!(entry.format_version, CACHE_FORMAT_VERSION);
+    assert_eq!(entry.metrics["naming_clarity"].value, RawMetricValue::Scale(4.5));
+    assert_eq!(entry.metrics["zero_based"].value, RawMetricValue::Scale(2.0));
+    assert_eq!(
+        entry.metrics["complexity_level"].value,
+        RawMetricValue::Enum("medium".to_string())
+    );
+
+    // Upgrading an already-current entry must not shift it again.
+    upgrade_cached_result(&mut entry, &metrics);
+    assert_eq!(entry.metrics["naming_clarity"].value, RawMetricValue::Scale(4.5));
+}
+
+#[test]
+fn test_cache_write_creates_self_ignoring_state_dir() {
+    let tmp = tempdir().unwrap();
+    let result = CachedFileResult {
+        format_version: CACHE_FORMAT_VERSION,
+        file_hash: "f".to_string(),
+        metrics_hash: "m".to_string(),
+        timestamp: chrono::Utc::now(),
+        metrics: HashMap::new(),
+        usage: None,
+    };
+
+    put_cached_result(tmp.path(), "key", &result).unwrap();
+
+    let gitignore = tmp.path().join(".qualitycheck").join(".gitignore");
+    let content = std::fs::read_to_string(gitignore).unwrap();
+    assert!(content.lines().any(|l| l.trim() == "*"));
 }

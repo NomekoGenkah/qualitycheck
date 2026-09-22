@@ -6,12 +6,13 @@ use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::cache::{
-    compute_cache_key, get_cached_result, put_cached_result, CachedFileResult,
+    compute_cache_key, get_cached_result, put_cached_result, upgrade_cached_result,
+    CachedFileResult, CACHE_FORMAT_VERSION,
 };
 use crate::error::{QualityCheckError, ScanError};
 use crate::jev_client::JevClient;
 use crate::profile::{compute_active_metrics_hash, Metric, Profile};
-use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult};
+use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, SCORING_VERSION};
 
 /// Orquestación concurrente y cacheada del pipeline de evaluación de archivos.
 pub async fn run_scan_pipeline(
@@ -100,6 +101,7 @@ pub async fn run_scan_pipeline(
     };
 
     Ok(ScanRunResult {
+        scoring_version: SCORING_VERSION,
         run_id,
         timestamp,
         target_path: target_path.to_string_lossy().to_string(),
@@ -137,7 +139,8 @@ async fn evaluate_single_file(
 
     let (cache_key, file_hash) = compute_cache_key(&file_bytes, metrics_hash);
 
-    let (metric_results, served_from_cache, usage) = if let Some(cached) = get_cached_result(project_root, &cache_key) {
+    let (metric_results, served_from_cache, usage) = if let Some(mut cached) = get_cached_result(project_root, &cache_key) {
+        upgrade_cached_result(&mut cached, metrics);
         (cached.metrics, true, cached.usage)
     } else {
         let content_str = match String::from_utf8(file_bytes.clone()) {
@@ -152,6 +155,7 @@ async fn evaluate_single_file(
 
         let usage = eval_res.usage.clone();
         let cached_entry = CachedFileResult {
+            format_version: CACHE_FORMAT_VERSION,
             file_hash,
             metrics_hash: metrics_hash.to_string(),
             timestamp: Utc::now(),
@@ -277,7 +281,7 @@ pub fn run_preview_pipeline(
         .filter(|f| !f.served_from_cache)
         .cloned()
         .collect();
-    uncached_sorted.sort_by(|a, b| b.estimated_input_tokens.cmp(&a.estimated_input_tokens));
+    uncached_sorted.sort_by_key(|f| std::cmp::Reverse(f.estimated_input_tokens));
 
     let top_uncached = if !full && total_files > 5 {
         uncached_sorted.into_iter().take(5).collect()

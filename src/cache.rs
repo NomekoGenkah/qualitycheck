@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CacheError;
+use crate::profile::{Metric, MetricType};
+use crate::storage::{ensure_state_dir, get_state_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -45,8 +47,14 @@ pub struct CachedMetricResult {
     pub confidence: f64,
 }
 
+/// Version 0 (legacy, field absent) stored scale answers as Jev's 0-based level position;
+/// version 1 stores them as the profile's level label (position + range min).
+pub const CACHE_FORMAT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachedFileResult {
+    #[serde(default)]
+    pub format_version: u32,
     pub file_hash: String,
     pub metrics_hash: String,
     pub timestamp: DateTime<Utc>,
@@ -68,7 +76,20 @@ pub fn compute_cache_key(file_bytes: &[u8], metrics_hash: &str) -> (String, Stri
 }
 
 pub fn get_cache_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".qualitycheck").join("cache")
+    get_state_dir(project_root).join("cache")
+}
+
+/// Brings a cache entry written by an older format up to `CACHE_FORMAT_VERSION`.
+pub fn upgrade_cached_result(result: &mut CachedFileResult, metrics: &[Metric]) {
+    if result.format_version == 0 {
+        for metric in metrics.iter().filter(|m| m.metric_type == MetricType::Scale) {
+            if let Some(cached) = result.metrics.get_mut(&metric.id)
+                && let RawMetricValue::Scale(position) = cached.value {
+                    cached.value = RawMetricValue::Scale(metric.scale_min_level() as f64 + position);
+                }
+        }
+    }
+    result.format_version = CACHE_FORMAT_VERSION;
 }
 
 pub fn get_cached_result(project_root: &Path, key: &str) -> Option<CachedFileResult> {
@@ -86,7 +107,9 @@ pub fn put_cached_result(
     key: &str,
     result: &CachedFileResult,
 ) -> Result<PathBuf, CacheError> {
-    let cache_dir = get_cache_dir(project_root);
+    let state_dir = ensure_state_dir(project_root)
+        .map_err(|e| CacheError::WriteError(get_state_dir(project_root), e))?;
+    let cache_dir = state_dir.join("cache");
     fs::create_dir_all(&cache_dir).map_err(|e| CacheError::WriteError(cache_dir.clone(), e))?;
 
     let cache_file = cache_dir.join(format!("{}.json", key));

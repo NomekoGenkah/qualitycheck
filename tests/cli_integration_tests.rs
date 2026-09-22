@@ -111,12 +111,14 @@ fn test_cli_scan_with_mock_jev_server() {
                 let mut buffer = [0u8; 4096];
                 let _ = stream.read(&mut buffer);
 
+                // Jev scores are 0-based positions on the criteria levels: 3.0 on a
+                // 1..5 scale is level "4", 3.5 is 4.5.
                 let mock_body = serde_json::json!({
                     "answers": {
-                        "naming_clarity": { "score": 4.0, "confidence": 0.87 },
+                        "naming_clarity": { "score": 3.0, "confidence": 0.87 },
                         "has_dead_code": { "noul": 0.05 },
                         "complexity_level": { "choice": "low", "confidence": 0.95 },
-                        "cohesion": { "score": 4.5, "confidence": 0.90 }
+                        "cohesion": { "score": 3.5, "confidence": 0.90 }
                     }
                 })
                 .to_string();
@@ -240,10 +242,10 @@ fn test_cli_scan_strict_mode_exit_code() {
 
                 let mock_body = serde_json::json!({
                     "answers": {
-                        "naming_clarity": { "score": 1.0, "confidence": 0.95 },
+                        "naming_clarity": { "score": 0.0, "confidence": 0.95 },
                         "has_dead_code": { "noul": 0.95 }, // true -> dead code present -> score 1.0
                         "complexity_level": { "choice": "critical", "confidence": 0.95 }, // critical -> score 1.0
-                        "cohesion": { "score": 1.0, "confidence": 0.95 }
+                        "cohesion": { "score": 0.0, "confidence": 0.95 }
                     }
                 })
                 .to_string();
@@ -391,10 +393,10 @@ fn test_cli_patch_command() {
 
                 let mock_body = serde_json::json!({
                     "answers": {
-                        "naming_clarity": { "score": 4.5, "confidence": 0.9 },
+                        "naming_clarity": { "score": 3.5, "confidence": 0.9 },
                         "has_dead_code": { "noul": 0.01 },
                         "complexity_level": { "choice": "low", "confidence": 0.95 },
-                        "cohesion": { "score": 4.5, "confidence": 0.9 }
+                        "cohesion": { "score": 3.5, "confidence": 0.9 }
                     }
                 })
                 .to_string();
@@ -430,6 +432,19 @@ fn test_cli_patch_command() {
         .success()
         .stdout(predicate::str::contains("modified.rs"))
         .stdout(predicate::str::contains("\"total_files\": 1"));
+
+    // The run report and cache entry just written must be invisible to git, even though the
+    // repo has no .gitignore of its own.
+    let mut status_opts = git2::StatusOptions::new();
+    status_opts.include_untracked(true).recurse_untracked_dirs(true);
+    let leaked: Vec<String> = repo
+        .statuses(Some(&mut status_opts))
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.path().ok().map(str::to_string))
+        .filter(|p| p.starts_with(".qualitycheck"))
+        .collect();
+    assert!(leaked.is_empty(), "qualitycheck output visible to git: {leaked:?}");
 
     drop(repo);
     drop(server_handle);
@@ -535,4 +550,62 @@ fn test_cli_scan_preview_summary_vs_full() {
         .stdout(predicate::str::contains("\"total_files\": 7"))
         .stdout(predicate::str::contains("\"is_full\": true"))
         .stdout(predicate::str::contains("\"files\""));
+}
+
+fn commit_all(repo: &git2::Repository, message: &str) {
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("test", "test@example.com").unwrap();
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+        .unwrap();
+}
+
+#[test]
+fn test_cli_patch_skips_own_output_binaries_and_excludes() {
+    let tmp_repo = tempdir().unwrap();
+    let root = tmp_repo.path();
+    let repo = git2::Repository::init(root).unwrap();
+    fs::write(root.join("base.rs"), "pub fn base() {}").unwrap();
+    commit_all(&repo, "base");
+
+    // The real change.
+    fs::write(root.join("modified.rs"), "pub fn new_code() {}").unwrap();
+    // Reports left by an older qualitycheck version, with no self-ignoring .gitignore and no
+    // `.qualitycheck/` entry in the repo's .gitignore: git sees them as untracked.
+    let runs_dir = root.join(".qualitycheck").join("runs");
+    fs::create_dir_all(&runs_dir).unwrap();
+    fs::write(runs_dir.join("old-run.json"), "{\"run_id\": \"old\"}").unwrap();
+    // A binary asset and a file the user excludes explicitly.
+    fs::write(root.join("logo.png"), [0x89u8, b'P', b'N', b'G', 0, 0, 1, 2]).unwrap();
+    fs::create_dir_all(root.join("vendor")).unwrap();
+    fs::write(root.join("vendor").join("gen.rs"), "pub fn generated() {}").unwrap();
+
+    let tmp_config = tempdir().unwrap();
+
+    Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(root)
+        .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+        .env_remove("JEV_API_KEY")
+        .arg("patch")
+        .arg("--base")
+        .arg("HEAD")
+        .arg("--exclude")
+        .arg("vendor/**")
+        .arg("--preview")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_files\": 1"))
+        .stdout(predicate::str::contains("modified.rs"))
+        .stdout(predicate::str::contains("old-run.json").not())
+        .stdout(predicate::str::contains("logo.png").not())
+        .stdout(predicate::str::contains("gen.rs").not());
 }

@@ -89,6 +89,18 @@ pub struct Metric {
     pub score_map: Option<HashMap<String, f64>>,
 }
 
+impl Metric {
+    /// Lowest integer level label of a scale metric (the label Jev's position 0 maps to).
+    pub fn scale_min_level(&self) -> i64 {
+        self.range.map(|r| r[0] as i64).unwrap_or(1)
+    }
+
+    /// Highest integer level label of a scale metric.
+    pub fn scale_max_level(&self) -> i64 {
+        self.range.map(|r| r[1] as i64).unwrap_or(5)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]

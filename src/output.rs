@@ -234,6 +234,7 @@ pub fn filter_gaps(run: &ScanRunResult) -> ScanRunResult {
     }
 
     ScanRunResult {
+        scoring_version: run.scoring_version,
         run_id: run.run_id.clone(),
         timestamp: run.timestamp,
         target_path: run.target_path.clone(),

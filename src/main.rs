@@ -23,7 +23,7 @@ use qualitycheck::output::{
 use qualitycheck::pipeline::run_preview_pipeline;
 use qualitycheck::profile::{list_available_profiles, load_profile, load_profiles_by_names};
 use qualitycheck::scorer::run_scan_pipeline;
-use qualitycheck::walker::{collect_files, WalkerOptions};
+use qualitycheck::walker::{collect_files, filter_candidate_files, WalkerOptions};
 
 #[tokio::main]
 async fn main() {
@@ -227,6 +227,14 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
 
     let changed_files = get_changed_files(&project_root, args.base.as_deref())?;
 
+    let walker_opts = WalkerOptions {
+        no_ignore: false,
+        include: args.include,
+        exclude: args.exclude,
+        max_file_size_kb: args.max_file_size,
+    };
+    let changed_files = filter_candidate_files(&changed_files, &project_root, &walker_opts)?;
+
     if changed_files.is_empty() {
         eprintln!("No changed files detected to scan.");
         return Ok(0);
@@ -378,6 +386,14 @@ fn handle_diff(args: DiffArgs) -> Result<i32, QualityCheckError> {
     let run_b = load_saved_run(&args.run_b, &project_root).map_err(|e| {
         QualityCheckError::Usage(format!("Failed to load run-b '{}': {}", args.run_b, e))
     })?;
+
+    if run_a.scoring_version != run_b.scoring_version {
+        eprintln!(
+            "Warning: runs were scored under different scoring versions ({} vs {}); deltas \
+             reflect scoring changes, not only code changes. Re-scan the older revision to compare.",
+            run_a.scoring_version, run_b.scoring_version
+        );
+    }
 
     let diff_report = diff_runs(&run_a, &run_b);
 

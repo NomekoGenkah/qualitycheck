@@ -79,6 +79,28 @@ pub fn collect_files(target: &Path, options: &WalkerOptions) -> Result<Vec<PathB
     Ok(files)
 }
 
+/// Applies the same eligibility rules as `collect_files` (internal paths, include/exclude globs,
+/// size and binary checks) to an explicit list of paths, such as files git reports as changed.
+pub fn filter_candidate_files(
+    paths: &[PathBuf],
+    root: &Path,
+    options: &WalkerOptions,
+) -> Result<Vec<PathBuf>, ScanError> {
+    let include_set = build_glob_set(&options.include)?;
+    let exclude_set = build_glob_set(&options.exclude)?;
+
+    Ok(paths
+        .iter()
+        .filter(|path| {
+            let relative_path = path.strip_prefix(root).unwrap_or(path);
+            !is_internal_qualitycheck_path(relative_path)
+                && matches_filters(path, root, &include_set, &exclude_set)
+                && is_file_eligible(path, options.max_file_size_kb)
+        })
+        .cloned()
+        .collect())
+}
+
 fn build_glob_set(patterns: &[String]) -> Result<Option<GlobSet>, ScanError> {
     if patterns.is_empty() {
         return Ok(None);

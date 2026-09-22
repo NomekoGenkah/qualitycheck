@@ -62,9 +62,9 @@ impl JevClient {
         for metric in metrics {
             let (q_type, criteria) = match metric.metric_type {
                 MetricType::Scale => {
-                    let min_int = metric.range.map(|r| r[0] as i64).unwrap_or(1);
-                    let max_int = metric.range.map(|r| r[1] as i64).unwrap_or(5);
-                    let levels: Vec<String> = (min_int..=max_int).map(|i| i.to_string()).collect();
+                    let levels: Vec<String> = (metric.scale_min_level()..=metric.scale_max_level())
+                        .map(|i| i.to_string())
+                        .collect();
                     ("score", Some(serde_json::to_value(levels).unwrap_or(Value::Null)))
                 }
                 MetricType::Enum => {
@@ -186,7 +186,9 @@ fn extract_metric_answer<'a>(root: &'a Value, metric_id: &str) -> Option<&'a Val
 fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevError> {
     match metric.metric_type {
         MetricType::Scale => {
-            let score_num = if let Some(n) = val.get("score").and_then(|v| v.as_f64()) {
+            // Jev returns a 0-based position on the criteria levels (0..=N-1), not the level
+            // label; shift it onto the profile's own range so the rest of the code sees labels.
+            let position = if let Some(n) = val.get("score").and_then(|v| v.as_f64()) {
                 n
             } else if let Some(n) = val.get("value").and_then(|v| v.as_f64()) {
                 n
@@ -207,7 +209,7 @@ fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevE
                 .unwrap_or(1.0);
 
             Ok(CachedMetricResult {
-                value: RawMetricValue::Scale(score_num),
+                value: RawMetricValue::Scale(metric.scale_min_level() as f64 + position),
                 confidence: confidence.clamp(0.0, 1.0),
             })
         }

@@ -16,8 +16,28 @@ pub struct RunListItem {
     pub path: PathBuf,
 }
 
+pub const STATE_DIR_NAME: &str = ".qualitycheck";
+
+pub fn get_state_dir(project_root: &Path) -> PathBuf {
+    project_root.join(STATE_DIR_NAME)
+}
+
+/// Creates `.qualitycheck/` with a `*` gitignore inside it, so git never reports the cache or
+/// run reports as untracked files (and `patch` never picks them up), regardless of whether the
+/// user's own `.gitignore` lists the directory.
+pub fn ensure_state_dir(project_root: &Path) -> io::Result<PathBuf> {
+    let state_dir = get_state_dir(project_root);
+    fs::create_dir_all(&state_dir)?;
+
+    let gitignore = state_dir.join(".gitignore");
+    if !gitignore.exists() {
+        fs::write(&gitignore, "# Created by qualitycheck automatically.\n*\n")?;
+    }
+    Ok(state_dir)
+}
+
 pub fn get_runs_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".qualitycheck").join("runs")
+    get_state_dir(project_root).join("runs")
 }
 
 pub fn persist_run_result(
@@ -41,7 +61,7 @@ pub fn persist_run_result(
         return Ok(Some(save_path.to_path_buf()));
     }
 
-    let runs_dir = get_runs_dir(project_root);
+    let runs_dir = ensure_state_dir(project_root)?.join("runs");
     fs::create_dir_all(&runs_dir)?;
 
     let run_file = runs_dir.join(format!("{}.json", result.run_id));
