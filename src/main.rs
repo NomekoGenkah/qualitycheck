@@ -23,7 +23,7 @@ use qualitycheck::output::{
 use qualitycheck::pipeline::run_preview_pipeline;
 use qualitycheck::profile::{list_available_profiles, load_profile, load_profiles_by_names};
 use qualitycheck::scorer::run_scan_pipeline;
-use qualitycheck::walker::{collect_files, filter_candidate_files, WalkerOptions};
+use qualitycheck::walker::{collect_files_from_targets, filter_candidate_files, WalkerOptions};
 
 #[tokio::main]
 async fn main() {
@@ -125,10 +125,15 @@ fn handle_describe() -> Result<i32, QualityCheckError> {
 }
 
 async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
-    let target_path = args.path.clone();
-    if !target_path.exists() {
-        return Err(ScanError::PathNotFound(target_path).into());
+    let targets = args.paths;
+    if let Some(missing) = targets.iter().find(|p| !p.exists()) {
+        return Err(ScanError::PathNotFound(missing.clone()).into());
     }
+    let targets_label = targets
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let profile_names: Vec<&str> = args
         .profile
@@ -150,15 +155,21 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
         max_file_size_kb: args.max_file_size,
     };
 
-    let files = collect_files(&target_path, &walker_opts)?;
+    let files = collect_files_from_targets(&targets, &walker_opts)?;
     if files.is_empty() {
-        eprintln!("No candidate files found to scan in '{}'.", target_path.display());
+        eprintln!("No candidate files found to scan in '{}'.", targets_label);
         return Ok(0);
     }
 
-    let project_root = find_repo_root(&target_path)
+    let project_root = find_repo_root(&targets[0])
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+
+    // A single target keeps file paths relative to it; several are shown relative to the repo.
+    let target_path = match targets.as_slice() {
+        [single] => single.clone(),
+        _ => project_root.clone(),
+    };
 
     let output_format = match args.format.to_lowercase().as_str() {
         "json" => OutputFormat::Json,
@@ -185,7 +196,7 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
 
     eprintln!(
         "Scanning {} ({} files, {}, concurrency {})...",
-        target_path.display(),
+        targets_label,
         files.len(),
         ignore_status,
         args.concurrency

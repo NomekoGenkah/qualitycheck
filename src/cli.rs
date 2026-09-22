@@ -53,9 +53,9 @@ pub enum Commands {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ScanArgs {
-    /// Target path (file or directory) to scan [default: .]
+    /// One or more target paths (files or directories) to scan [default: .]
     #[arg(default_value = ".")]
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
 
     /// One or more profiles to run, comma-separated (e.g. "quality,security")
     #[arg(long, default_value = "quality")]

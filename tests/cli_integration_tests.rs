@@ -609,3 +609,114 @@ fn test_cli_patch_skips_own_output_binaries_and_excludes() {
         .stdout(predicate::str::contains("logo.png").not())
         .stdout(predicate::str::contains("gen.rs").not());
 }
+
+#[test]
+fn test_cli_scan_accepts_multiple_paths() {
+    let tmp_repo = tempdir().unwrap();
+    let root = tmp_repo.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src").join("new.rs"), "pub fn new_impl() {}").unwrap();
+    fs::write(root.join("src").join("old.rs"), "pub fn old_impl() {}").unwrap();
+    fs::write(root.join("src").join("other.rs"), "pub fn other() {}").unwrap();
+    let tmp_config = tempdir().unwrap();
+
+    let preview = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("qualitycheck").unwrap();
+        cmd.current_dir(root)
+            .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+            .env_remove("JEV_API_KEY")
+            .args(args)
+            .args(["--preview", "--format", "json"]);
+        cmd.assert()
+    };
+
+    // Two specific files, via the subcommand and via the implicit default command.
+    for args in [
+        &["scan", "src/new.rs", "src/old.rs"][..],
+        &["src/new.rs", "src/old.rs"][..],
+    ] {
+        preview(args)
+            .success()
+            .stdout(predicate::str::contains("\"total_files\": 2"))
+            .stdout(predicate::str::contains("src/new.rs"))
+            .stdout(predicate::str::contains("src/old.rs"))
+            .stdout(predicate::str::contains("other.rs").not());
+    }
+
+    // Overlapping targets scan each file once.
+    preview(&["scan", "src", "src/new.rs", "./src/new.rs"])
+        .success()
+        .stdout(predicate::str::contains("\"total_files\": 3"));
+
+    // Any missing target is an error, not silently skipped.
+    preview(&["scan", "src/new.rs", "src/missing.rs"])
+        .failure()
+        .stderr(predicate::str::contains("src/missing.rs"));
+}
+
+/// Serves `body` as the Jev response for up to `max_requests` requests; returns the endpoint URL.
+fn spawn_mock_jev(body: serde_json::Value, max_requests: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/v1/systemone", listener.local_addr().unwrap().port());
+    let body = body.to_string();
+    thread::spawn(move || {
+        for _ in 0..max_requests {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(http_response.as_bytes());
+            }
+        }
+    });
+    url
+}
+
+#[test]
+fn test_cli_scan_excludes_low_confidence_metrics() {
+    // cohesion at the lowest level but 5% confidence: counted, it would drag 4.0 down to 3.3.
+    let mock_url = spawn_mock_jev(
+        serde_json::json!({
+            "answers": {
+                "naming_clarity": { "score": 3.0, "confidence": 0.87 },
+                "has_dead_code": { "noul": 0.05 },
+                "complexity_level": { "choice": "medium", "confidence": 0.9 },
+                "cohesion": { "score": 0.0, "confidence": 0.05 }
+            }
+        }),
+        5,
+    );
+
+    let tmp_repo = tempdir().unwrap();
+    fs::write(tmp_repo.path().join("controller.rs"), "pub fn handle() {}").unwrap();
+    let tmp_config = tempdir().unwrap();
+
+    let scan = |extra: &[&str]| {
+        let mut cmd = Command::cargo_bin("qualitycheck").unwrap();
+        cmd.current_dir(tmp_repo.path())
+            .env("QUALITYCHECK_CONFIG_DIR", tmp_config.path())
+            .env("JEV_API_KEY", "test_key")
+            .env("JEV_API_URL", &mock_url)
+            .args(["scan", ".", "--strict"])
+            .args(extra);
+        cmd.assert()
+    };
+
+    // (4*1 + 5*0.5 + 3.67*1.5) / 3 = 4.0 without cohesion.
+    scan(&["--format", "json"])
+        .success()
+        .stdout(predicate::str::contains("\"composite_score\": 4.0"))
+        .stdout(predicate::str::contains("\"excluded_low_confidence\": true"))
+        .stdout(predicate::str::contains("\"inconclusive\": false"));
+
+    scan(&["--no-color"])
+        .success()
+        .stdout(predicate::str::contains(
+            "cohesion: 1/5 (5% conf.) [excluded: below 20% min conf.]",
+        ))
+        .stdout(predicate::str::contains("has_dead_code: false (90% conf.)"));
+}

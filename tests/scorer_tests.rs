@@ -134,6 +134,7 @@ fn test_composite_score_calculation() {
         name: "quality".to_string(),
         description: "Code quality".to_string(),
         fail_below: 3.0,
+        min_confidence: None,
         metrics: vec![
             Metric {
                 id: "naming_clarity".to_string(),
@@ -208,4 +209,78 @@ fn test_composite_score_calculation() {
     // = (4.0 + 2.5 + 5.5) / 3.0 = 12.0 / 3.0 = 4.0
     assert_eq!(eval.composite_score, 4.0);
     assert!(eval.passed);
+}
+
+fn gating_profile(min_confidence: Option<f64>) -> Profile {
+    let scale = |id: &str| Metric {
+        id: id.to_string(),
+        metric_type: MetricType::Scale,
+        question: id.to_string(),
+        weight: 1.0,
+        range: Some([1.0, 5.0]),
+        options: None,
+        good_value: None,
+        score_map: None,
+    };
+    Profile {
+        schema: None,
+        name: "quality".to_string(),
+        description: "Code quality".to_string(),
+        fail_below: 3.0,
+        min_confidence,
+        metrics: vec![scale("naming_clarity"), scale("cohesion")],
+    }
+}
+
+fn answers(naming: (f64, f64), cohesion: (f64, f64)) -> HashMap<String, CachedMetricResult> {
+    let mut results = HashMap::new();
+    for (id, (value, confidence)) in [("naming_clarity", naming), ("cohesion", cohesion)] {
+        results.insert(
+            id.to_string(),
+            CachedMetricResult {
+                value: RawMetricValue::Scale(value),
+                confidence,
+            },
+        );
+    }
+    results
+}
+
+#[test]
+fn test_low_confidence_metric_is_excluded_from_composite() {
+    // cohesion = 1 at 5% confidence would drag the composite to 2.5 and fail the file.
+    let evals = evaluate_file_with_metrics(&[gating_profile(None)], &answers((4.0, 0.9), (1.0, 0.05)));
+    let eval = &evals[0];
+
+    assert_eq!(eval.composite_score, 4.0);
+    assert!(eval.passed);
+    assert!(!eval.inconclusive);
+    assert_eq!(eval.min_confidence, 0.2);
+    let cohesion = eval.metrics.iter().find(|m| m.metric_id == "cohesion").unwrap();
+    assert!(cohesion.excluded_low_confidence);
+    let naming = eval.metrics.iter().find(|m| m.metric_id == "naming_clarity").unwrap();
+    assert!(!naming.excluded_low_confidence);
+}
+
+#[test]
+fn test_all_metrics_below_min_confidence_is_inconclusive_not_failed() {
+    let evals = evaluate_file_with_metrics(&[gating_profile(None)], &answers((1.0, 0.1), (2.0, 0.0)));
+    let eval = &evals[0];
+
+    assert!(eval.inconclusive);
+    assert!(eval.passed, "an unjudged profile must not fail --strict");
+    // Reported composite falls back to all metrics, for reference.
+    assert_eq!(eval.composite_score, 1.5);
+}
+
+#[test]
+fn test_profile_min_confidence_override() {
+    let low_conf = answers((4.0, 0.9), (1.0, 0.05));
+
+    let counted = evaluate_file_with_metrics(&[gating_profile(Some(0.0))], &low_conf);
+    assert_eq!(counted[0].composite_score, 2.5);
+    assert!(!counted[0].passed);
+
+    let strict = evaluate_file_with_metrics(&[gating_profile(Some(0.95))], &low_conf);
+    assert!(strict[0].inconclusive);
 }

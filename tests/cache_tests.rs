@@ -16,6 +16,7 @@ fn test_cache_key_invalidation_on_metric_change() {
         name: "quality".to_string(),
         description: "Desc".to_string(),
         fail_below: 3.0,
+        min_confidence: None,
         metrics: vec![Metric {
             id: "naming_clarity".to_string(),
             metric_type: MetricType::Scale,
@@ -33,6 +34,7 @@ fn test_cache_key_invalidation_on_metric_change() {
         name: "quality".to_string(),
         description: "Desc".to_string(),
         fail_below: 3.0,
+        min_confidence: None,
         metrics: vec![Metric {
             id: "naming_clarity".to_string(),
             metric_type: MetricType::Scale,
@@ -113,6 +115,19 @@ fn scale_metric(id: &str, range: [f64; 2]) -> Metric {
     }
 }
 
+fn binary_metric(id: &str) -> Metric {
+    Metric {
+        id: id.to_string(),
+        metric_type: MetricType::Binary,
+        question: "Q".to_string(),
+        weight: 1.0,
+        range: None,
+        options: None,
+        good_value: Some(false),
+        score_map: None,
+    }
+}
+
 #[test]
 fn test_legacy_cache_entry_scale_positions_are_upgraded() {
     // Entries written before format_version existed stored Jev's 0-based level position.
@@ -123,7 +138,8 @@ fn test_legacy_cache_entry_scale_positions_are_upgraded() {
         "metrics": {
             "naming_clarity": { "value": 3.5, "confidence": 0.65 },
             "zero_based": { "value": 2.0, "confidence": 0.9 },
-            "complexity_level": { "value": "medium", "confidence": 0.4 }
+            "complexity_level": { "value": "medium", "confidence": 0.4 },
+            "has_dead_code": { "value": false, "confidence": 0.95 }
         }
     }"#;
     let mut entry: CachedFileResult = serde_json::from_str(legacy_json).unwrap();
@@ -132,6 +148,7 @@ fn test_legacy_cache_entry_scale_positions_are_upgraded() {
     let metrics = vec![
         scale_metric("naming_clarity", [1.0, 5.0]),
         scale_metric("zero_based", [0.0, 4.0]),
+        binary_metric("has_dead_code"),
     ];
     upgrade_cached_result(&mut entry, &metrics);
 
@@ -142,10 +159,35 @@ fn test_legacy_cache_entry_scale_positions_are_upgraded() {
         entry.metrics["complexity_level"].value,
         RawMetricValue::Enum("medium".to_string())
     );
+    // Binary confidence max(p, 1-p) = 0.95 becomes |2p - 1| = 0.9.
+    assert!((entry.metrics["has_dead_code"].confidence - 0.9).abs() < 1e-9);
 
     // Upgrading an already-current entry must not shift it again.
     upgrade_cached_result(&mut entry, &metrics);
     assert_eq!(entry.metrics["naming_clarity"].value, RawMetricValue::Scale(4.5));
+    assert!((entry.metrics["has_dead_code"].confidence - 0.9).abs() < 1e-9);
+}
+
+#[test]
+fn test_v1_cache_entry_only_upgrades_binary_confidence() {
+    let v1_json = r#"{
+        "format_version": 1,
+        "file_hash": "f",
+        "metrics_hash": "m",
+        "timestamp": "2026-09-22T10:00:00Z",
+        "metrics": {
+            "naming_clarity": { "value": 4.5, "confidence": 0.65 },
+            "has_dead_code": { "value": true, "confidence": 0.5 }
+        }
+    }"#;
+    let mut entry: CachedFileResult = serde_json::from_str(v1_json).unwrap();
+    upgrade_cached_result(
+        &mut entry,
+        &[scale_metric("naming_clarity", [1.0, 5.0]), binary_metric("has_dead_code")],
+    );
+
+    assert_eq!(entry.metrics["naming_clarity"].value, RawMetricValue::Scale(4.5));
+    assert_eq!(entry.metrics["has_dead_code"].confidence, 0.0);
 }
 
 #[test]

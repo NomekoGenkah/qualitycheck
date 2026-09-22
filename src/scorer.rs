@@ -20,6 +20,10 @@ pub struct MetricEvaluation {
     pub normalized_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<[f64; 2]>,
+    /// Confidence fell below the profile's `min_confidence`, so this metric is reported but
+    /// does not count toward the composite score.
+    #[serde(default)]
+    pub excluded_low_confidence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -27,7 +31,13 @@ pub struct ProfileEvaluation {
     pub profile_name: String,
     pub composite_score: f64,
     pub fail_below: f64,
+    #[serde(default)]
+    pub min_confidence: f64,
     pub passed: bool,
+    /// Every metric was excluded for low confidence: `composite_score` is then computed over
+    /// all metrics for reference only, and the profile passes without being judged.
+    #[serde(default)]
+    pub inconclusive: bool,
     pub metrics: Vec<MetricEvaluation>,
 }
 
@@ -49,10 +59,11 @@ pub struct FileEvaluation {
     pub profiles: Vec<ProfileEvaluation>,
 }
 
-/// Bumped whenever the same raw answers would produce different normalized scores, so runs
+/// Bumped whenever the same raw answers would produce different composite scores, so runs
 /// scored under different rules aren't silently compared. Version 0 (legacy, field absent)
-/// under-scored every scale metric by one level.
-pub const SCORING_VERSION: u32 = 1;
+/// under-scored every scale metric by one level; version 1 counted every metric regardless of
+/// confidence.
+pub const SCORING_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanRunResult {
@@ -154,17 +165,21 @@ pub fn evaluate_file_with_metrics(
     let mut profile_evals = Vec::with_capacity(profiles.len());
 
     for profile in profiles {
-        let mut total_weighted_score = 0.0;
-        let mut total_weight = 0.0;
+        let min_confidence = profile.effective_min_confidence();
+        let mut confident = WeightedSum::default();
+        let mut everything = WeightedSum::default();
         let mut metric_evals = Vec::with_capacity(profile.metrics.len());
 
         for metric in &profile.metrics {
             if let Some(cached) = metric_results.get(&metric.id) {
                 let normalized = normalize_metric_score(metric, &cached.value);
                 let weight = if metric.weight > 0.0 { metric.weight } else { 1.0 };
+                let excluded_low_confidence = cached.confidence < min_confidence;
 
-                total_weighted_score += normalized * weight;
-                total_weight += weight;
+                everything.add(normalized, weight);
+                if !excluded_low_confidence {
+                    confident.add(normalized, weight);
+                }
 
                 metric_evals.push(MetricEvaluation {
                     metric_id: metric.id.clone(),
@@ -175,26 +190,51 @@ pub fn evaluate_file_with_metrics(
                     confidence: cached.confidence,
                     normalized_score: normalized,
                     range: metric.range,
+                    excluded_low_confidence,
                 });
             }
         }
 
-        let composite_score = if total_weight > 0.0 {
-            (total_weighted_score / total_weight * 10.0).round() / 10.0
+        let inconclusive = confident.weight == 0.0 && everything.weight > 0.0;
+        let composite_score = if inconclusive {
+            everything.mean()
         } else {
-            5.0
+            confident.mean()
         };
-
-        let passed = composite_score >= profile.fail_below;
+        let passed = inconclusive || composite_score >= profile.fail_below;
 
         profile_evals.push(ProfileEvaluation {
             profile_name: profile.name.clone(),
             composite_score,
             fail_below: profile.fail_below,
+            min_confidence,
             passed,
+            inconclusive,
             metrics: metric_evals,
         });
     }
 
     profile_evals
+}
+
+#[derive(Default)]
+struct WeightedSum {
+    total: f64,
+    weight: f64,
+}
+
+impl WeightedSum {
+    fn add(&mut self, score: f64, weight: f64) {
+        self.total += score * weight;
+        self.weight += weight;
+    }
+
+    /// Weighted mean rounded to one decimal; 5.0 when nothing was added.
+    fn mean(&self) -> f64 {
+        if self.weight > 0.0 {
+            (self.total / self.weight * 10.0).round() / 10.0
+        } else {
+            5.0
+        }
+    }
 }

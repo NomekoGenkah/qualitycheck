@@ -81,6 +81,9 @@ qualitycheck scan src/ --preview --format json
 # Scan current directory with default "quality" profile
 qualitycheck scan .
 
+# Scan several specific files or directories in one run (e.g. new code vs. its precedent)
+qualitycheck scan src/new_handler.rs src/old_handler.rs
+
 # Scan with multiple profiles combined
 qualitycheck scan ./src --profile quality,security --format table
 
@@ -152,6 +155,7 @@ Profiles are stored in JSON (built into the binary and copied to `~/.config/qual
   "name": "quality",
   "description": "Overall code readability, maintainability, and structure",
   "fail_below": 3.0,
+  "min_confidence": 0.2,
   "metrics": [
     {
       "id": "naming_clarity",
@@ -176,6 +180,11 @@ Profiles are stored in JSON (built into the binary and copied to `~/.config/qual
   ]
 }
 ```
+
+`min_confidence` (optional, default `0.2`) excludes metrics Jev answered with near-flat probability
+from the composite score: they are still reported, flagged `excluded_low_confidence`. If every metric
+of a profile is excluded, the profile is reported `inconclusive` and does not fail `--strict`. It is
+scoring policy only, so changing it never invalidates the cache.
 
 ---
 

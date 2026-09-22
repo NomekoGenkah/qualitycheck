@@ -49,7 +49,8 @@ pub struct CachedMetricResult {
 
 /// Version 0 (legacy, field absent) stored scale answers as Jev's 0-based level position;
 /// version 1 stores them as the profile's level label (position + range min).
-pub const CACHE_FORMAT_VERSION: u32 = 1;
+/// Versions 0 and 1 stored binary confidence as max(p, 1 − p); version 2 stores |2p − 1|.
+pub const CACHE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachedFileResult {
@@ -81,12 +82,19 @@ pub fn get_cache_dir(project_root: &Path) -> PathBuf {
 
 /// Brings a cache entry written by an older format up to `CACHE_FORMAT_VERSION`.
 pub fn upgrade_cached_result(result: &mut CachedFileResult, metrics: &[Metric]) {
-    if result.format_version == 0 {
-        for metric in metrics.iter().filter(|m| m.metric_type == MetricType::Scale) {
-            if let Some(cached) = result.metrics.get_mut(&metric.id)
-                && let RawMetricValue::Scale(position) = cached.value {
-                    cached.value = RawMetricValue::Scale(metric.scale_min_level() as f64 + position);
-                }
+    let version = result.format_version;
+    for metric in metrics {
+        let Some(cached) = result.metrics.get_mut(&metric.id) else {
+            continue;
+        };
+        match (metric.metric_type, &cached.value) {
+            (MetricType::Scale, RawMetricValue::Scale(position)) if version < 1 => {
+                cached.value = RawMetricValue::Scale(metric.scale_min_level() as f64 + position);
+            }
+            (MetricType::Binary, RawMetricValue::Binary(_)) if version < 2 => {
+                cached.confidence = (2.0 * cached.confidence - 1.0).clamp(0.0, 1.0);
+            }
+            _ => {}
         }
     }
     result.format_version = CACHE_FORMAT_VERSION;

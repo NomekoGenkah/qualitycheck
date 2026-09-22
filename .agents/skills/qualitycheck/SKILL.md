@@ -85,7 +85,7 @@ When refactoring code to improve quality:
 
 | Command | Purpose | Key Flags |
 |---|---|---|
-| `qualitycheck scan [PATH]` | Scan a file or directory | `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
+| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
 | `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--preview`, `--strict`, `--format <table\|json>` |
 | `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
@@ -115,4 +115,8 @@ qualitycheck scan src/ --profile quality,security --format json
 
 - `0`: Scan succeeded and all files met thresholds (or running in informational mode without `--strict`).
 - `1`: Strict mode failure (`--strict`) — one or more files scored below the profile's `fail_below` threshold.
+
+Metrics with `"excluded_low_confidence": true` were answered with confidence below the profile's
+`min_confidence` and do not count toward `composite_score`; don't treat them as findings. A profile
+with `"inconclusive": true` had every metric excluded and was not judged.
 - `2`: Configuration or usage error (e.g. missing API key, invalid profile).

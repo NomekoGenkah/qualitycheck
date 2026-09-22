@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,25 @@ pub fn collect_files(target: &Path, options: &WalkerOptions) -> Result<Vec<PathB
     }
 
     files.sort();
+    Ok(files)
+}
+
+/// Collects files from several targets, dropping files reached through more than one target
+/// (e.g. `src` and `src/main.rs`, or `a.rs` and `./a.rs`).
+pub fn collect_files_from_targets(
+    targets: &[PathBuf],
+    options: &WalkerOptions,
+) -> Result<Vec<PathBuf>, ScanError> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for target in targets {
+        for file in collect_files(target, options)? {
+            let identity = file.canonicalize().unwrap_or_else(|_| file.clone());
+            if seen.insert(identity) {
+                files.push(file);
+            }
+        }
+    }
     Ok(files)
 }
 

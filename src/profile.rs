@@ -21,6 +21,7 @@ pub const PROFILE_SCHEMA_JSON: &str = r#"{
     "name": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
     "fail_below": { "type": "number", "minimum": 0 },
+    "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "metrics": {
       "type": "array",
       "minItems": 1,
@@ -108,6 +109,11 @@ pub struct Profile {
     pub name: String,
     pub description: String,
     pub fail_below: f64,
+    /// Metrics answered with confidence below this are excluded from the composite score.
+    /// Scoring policy only: deliberately not part of the metrics hash, so changing it never
+    /// invalidates cached answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
     pub metrics: Vec<Metric>,
 }
 
@@ -121,7 +127,13 @@ pub struct ProfileSummary {
     pub source_path: Option<PathBuf>,
 }
 
+pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.2;
+
 impl Profile {
+    pub fn effective_min_confidence(&self) -> f64 {
+        self.min_confidence.unwrap_or(DEFAULT_MIN_CONFIDENCE)
+    }
+
     pub fn validate_and_parse(raw_json: &str, source_name: &str) -> Result<Profile, ProfileError> {
         let value: Value = serde_json::from_str(raw_json)
             .map_err(|e| ProfileError::JsonError(source_name.to_string(), e))?;

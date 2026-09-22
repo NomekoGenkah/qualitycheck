@@ -69,12 +69,18 @@ pub fn print_scan_result(
                         let conf_pct = (metric.confidence * 100.0).round() as u64;
 
                         let metric_line = format!(
-                            "  [{}] {}: {} ({}% conf.)",
-                            profile.profile_name, metric.metric_id, val_str, conf_pct
+                            "  [{}] {}: {} ({}% conf.){}",
+                            profile.profile_name,
+                            metric.metric_id,
+                            val_str,
+                            conf_pct,
+                            excluded_suffix(metric, profile.min_confidence)
                         );
 
                         let colored_line = if colors_enabled {
-                            if metric.normalized_score >= 4.0 {
+                            if metric.excluded_low_confidence {
+                                colorize(&metric_line, "90")
+                            } else if metric.normalized_score >= 4.0 {
                                 colorize(&metric_line, "32")
                             } else if metric.normalized_score >= 3.0 {
                                 colorize(&metric_line, "33")
@@ -91,9 +97,15 @@ pub fn print_scan_result(
 
                 let mut composite_parts = Vec::new();
                 for profile in &file.profiles {
-                    let score_str = format!("{} {:.1}/5", profile.profile_name, profile.composite_score);
+                    let score_str = if profile.inconclusive {
+                        format!("{} INCONCLUSIVE", profile.profile_name)
+                    } else {
+                        format!("{} {:.1}/5", profile.profile_name, profile.composite_score)
+                    };
                     let part = if colors_enabled {
-                        if profile.passed {
+                        if profile.inconclusive {
+                            colorize(&score_str, "33")
+                        } else if profile.passed {
                             colorize(&score_str, "32")
                         } else {
                             colorize(&score_str, "31;1")
@@ -165,12 +177,18 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                     let val_str = format_metric_display(metric);
                     let conf_pct = (metric.confidence * 100.0).round() as u64;
                     let line = format!(
-                        "  {}: {} ({}% conf.) -> normalized: {:.1}/5",
-                        metric.metric_id, val_str, conf_pct, metric.normalized_score
+                        "  {}: {} ({}% conf.) -> normalized: {:.1}/5{}",
+                        metric.metric_id,
+                        val_str,
+                        conf_pct,
+                        metric.normalized_score,
+                        excluded_suffix(metric, profile.min_confidence)
                     );
 
                     let colored_line = if colors_enabled {
-                        if metric.normalized_score >= 4.0 {
+                        if metric.excluded_low_confidence {
+                            colorize(&line, "90")
+                        } else if metric.normalized_score >= 4.0 {
                             colorize(&line, "32")
                         } else if metric.normalized_score >= 3.0 {
                             colorize(&line, "33")
@@ -184,11 +202,19 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                 }
 
                 let comp_str = format!("Composite score: {:.1}/5", profile.composite_score);
-                let status_str = if profile.passed { "PASS" } else { "FAIL" };
+                let status_str = if profile.inconclusive {
+                    "INCONCLUSIVE: every metric below min confidence"
+                } else if profile.passed {
+                    "PASS"
+                } else {
+                    "FAIL"
+                };
                 let summary_line = format!("{} [{}]", comp_str, status_str);
 
                 if colors_enabled {
-                    if profile.passed {
+                    if profile.inconclusive {
+                        println!("{}", colorize(&summary_line, "33;1"));
+                    } else if profile.passed {
                         println!("{}", colorize(&summary_line, "32;1"));
                     } else {
                         println!("{}", colorize(&summary_line, "31;1"));
@@ -214,7 +240,7 @@ pub fn filter_gaps(run: &ScanRunResult) -> ScanRunResult {
                 let failing_metrics: Vec<MetricEvaluation> = profile
                     .metrics
                     .iter()
-                    .filter(|m| m.normalized_score < profile.fail_below)
+                    .filter(|m| !m.excluded_low_confidence && m.normalized_score < profile.fail_below)
                     .cloned()
                     .collect();
 
@@ -478,6 +504,17 @@ fn format_metric_display(metric: &MetricEvaluation) -> String {
         }
         RawMetricValue::Enum(s) => s.clone(),
         RawMetricValue::Binary(b) => b.to_string(),
+    }
+}
+
+fn excluded_suffix(metric: &MetricEvaluation, min_confidence: f64) -> String {
+    if metric.excluded_low_confidence {
+        format!(
+            " [excluded: below {}% min conf.]",
+            (min_confidence * 100.0).round() as u64
+        )
+    } else {
+        String::new()
     }
 }
 

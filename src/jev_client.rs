@@ -269,16 +269,12 @@ fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevE
                 )));
             };
 
-            // Jev calibrated probability: prob is probability statement is true
-            let (verdict, confidence) = if prob >= 0.5 {
-                (true, prob)
-            } else {
-                (false, 1.0 - prob)
-            };
-
+            // Jev calibrated probability: prob is probability statement is true. Nouls carry no
+            // confidence of their own; use Jev's Choice formula for two options, (2·p_max − 1),
+            // so a coin-flip answer scores 0 like a flat Choice/Score distribution does.
             Ok(CachedMetricResult {
-                value: RawMetricValue::Binary(verdict),
-                confidence: confidence.clamp(0.0, 1.0),
+                value: RawMetricValue::Binary(prob >= 0.5),
+                confidence: (2.0 * prob - 1.0).abs().clamp(0.0, 1.0),
             })
         }
     }
