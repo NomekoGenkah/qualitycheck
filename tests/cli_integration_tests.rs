@@ -767,6 +767,19 @@ fn test_cli_unedited_installed_profile_is_upgraded_but_edited_one_is_kept() {
         fs::read_to_string(profiles_dir.join("security.json")).unwrap(),
         edited_security
     );
+
+    // An installed copy identical to the built-in is not reported as a custom profile.
+    let listing = run(&["profiles", "list"]).success();
+    let listing = String::from_utf8_lossy(&listing.get_output().stdout).to_string();
+    let source_of = |name: &str| {
+        listing
+            .lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(3))
+            .map(str::to_string)
+    };
+    assert_eq!(source_of("quality").as_deref(), Some("builtin"));
+    assert_eq!(source_of("security").as_deref(), Some("custom"));
 }
 
 #[test]

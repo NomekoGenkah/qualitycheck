@@ -15,7 +15,7 @@ Use the `qualitycheck` CLI tool to evaluate qualitative code metrics determinist
 Activate this skill when:
 - The user requests a code review, quality audit, or sanity check on files or directories.
 - Evaluating changes before a commit or PR (`qualitycheck patch`).
-- Verifying whether a refactoring improved or degraded code quality (`qualitycheck diff`).
+- Verifying whether a change or refactoring improved or degraded code quality (`qualitycheck patch --delta`, or `qualitycheck diff` between saved runs).
 - Triaging quality regressions or identifying failing metrics (`qualitycheck gaps`).
 
 ---
@@ -59,6 +59,13 @@ In the JSON report, `regressions` lists what the change made worse (`kind`: `dro
 `below_threshold_without_base`); `file_diffs` has composite and metric deltas per changed file
 (`old_composite` is `null` for files without a base version).
 
+Small deltas can be noise: a metric answered at low confidence (below ~0.5) may flip between
+neighbouring options on near-identical code. Use an allowance of at least `0.5`, and check a
+metric's `confidence` in the working-tree run before treating its change as real.
+
+`--context` costs roughly 2–3× the input tokens for files that get related files; check what would
+be attached with `--context --preview --full` first.
+
 ### 3. Always Use Structured JSON for Parsing
 Always pass `--format json` so the output can be parsed directly without ANSI escape sequences:
 ```bash
@@ -76,8 +83,9 @@ qualitycheck gaps --format json
 qualitycheck gaps --run <run-id> --format json
 ```
 
-### 5. Verify Refactoring Improvements with `diff`
-When refactoring code to improve quality:
+### 5. Verify Refactoring Improvements
+For uncommitted or branch changes, `qualitycheck patch --delta --format json` compares every
+changed file against its base version in one run. To compare arbitrary points in time instead:
 1. Run a scan before making edits and record the run ID:
    ```bash
    qualitycheck scan <file-path> --format json
@@ -128,7 +136,7 @@ qualitycheck scan src/ --profile quality,security --format json
 ## Exit Codes
 
 - `0`: Scan succeeded and all files met thresholds (or running in informational mode without `--strict`).
-- `1`: Strict mode failure (`--strict`) — one or more files scored below the profile's `fail_below` threshold.
+- `1`: Gate failure — with `--strict`, a file scored below its profile's `fail_below`; with `--fail-on-regression`, the change introduced a regression.
 - `2`: Configuration or usage error (e.g. missing API key, invalid profile).
 
 Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition doesn't hold for the

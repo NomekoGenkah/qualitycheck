@@ -27,6 +27,14 @@ const SUPERSEDED_BUILTIN_HASHES: &[&str] = &[
     "e9d4658f72e4ac8c68ed73420d8722d44e830ac02e0839e152da40881fa6be07",
 ];
 
+/// True when `content` is an unmodified copy of a current built-in profile (as `init` installs).
+fn is_current_builtin(content: &str) -> bool {
+    let content = content.replace("\r\n", "\n");
+    BUILTIN_PROFILES
+        .iter()
+        .any(|(_, builtin)| builtin.replace("\r\n", "\n") == content)
+}
+
 /// True when `content` is an unmodified copy of an older built-in profile.
 pub fn is_superseded_builtin(content: &str) -> bool {
     let hash = blake3::hash(content.replace("\r\n", "\n").as_bytes());
@@ -416,7 +424,8 @@ pub fn list_available_profiles() -> Vec<ProfileSummary> {
                 let path = entry.path();
                 if path.is_file() && path.extension().is_some_and(|ext| ext == "json")
                     && let Ok(content) = fs::read_to_string(&path)
-                    && !is_superseded_builtin(&content) {
+                    && !is_superseded_builtin(&content)
+                    && !is_current_builtin(&content) {
                         let file_stem = path
                             .file_stem()
                             .and_then(|s| s.to_str())

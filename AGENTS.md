@@ -12,6 +12,7 @@ Welcome! This document provides AI coding agents (Claude Code, Cursor, OpenCode,
 - **Primary Modules**:
   - `src/cli.rs`: Clap command definitions and flags (`scan`, `patch`, `gaps`, `file`, `diff`, `runs`, `profiles`, `init`, `describe`).
   - `src/jev_client.rs`: Async client for Jev API (`evaluate_file`).
+  - `src/profile.rs`: Profile model, schema validation, metrics hash, built-in profile upgrades.
   - `src/cache.rs`: Blake3 content-addressed cache in `.qualitycheck/cache/`.
   - `src/context.rs`: Deterministic selection of related files sent as context (`--context`).
   - `src/git.rs`: Changed files and their base-revision content for `patch`.
@@ -32,8 +33,8 @@ cargo check
 # Run the test suite (all tests must pass)
 cargo test
 
-# Linter checks (zero warnings required)
-cargo clippy --all-targets
+# Linter checks (zero warnings required; CI denies warnings)
+cargo clippy --all-targets -- -D warnings
 
 # Compile optimized release binary
 cargo build --release
@@ -44,8 +45,8 @@ cargo build --release
 # Offline estimation of token cost for current working tree
 qualitycheck patch --preview
 
-# Evaluate current changes before committing
-qualitycheck patch --strict --format json
+# Evaluate current changes before committing: fail only on regressions this change introduces
+qualitycheck patch --fail-on-regression 0.5 --format json
 
 # Filter failing metrics only
 qualitycheck gaps --format json

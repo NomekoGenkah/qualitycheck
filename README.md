@@ -12,11 +12,13 @@ Designed to be run by humans directly, in CI pipelines, or invoked by AI coding 
 
 ## Key Features
 
-- **Deterministic Aggregation**: Jev returns raw typed metric values (`scale`, `enum`, `binary`) with calibrated confidence. All aggregation (weighted averages, threshold comparisons, and gating decisions) is calculated deterministically in Rust.
-- **Content-Addressed Caching**: Powered by `blake3(file_content) + blake3(active_metric_definitions)`. Re-scans cost zero API calls and zero latency for unchanged files. Editing a metric automatically invalidates stale results.
+- **Deterministic Aggregation**: Jev returns raw typed metric values (`scale`, `enum`, `binary`) with calibrated confidence. All aggregation (weighted averages, threshold comparisons, confidence and applicability exclusions, regression gating) is calculated deterministically in Rust.
+- **Rubric-Described Metrics**: Every built-in metric describes each possible answer as a concrete situation, and can declare when it applies (`applies_when`), so a file isn't scored on concerns it doesn't own. Low-confidence answers are reported but kept out of the composite.
+- **Content-Addressed Caching**: Keyed by `blake3(file_content)` plus a hash of what is asked (questions, rubrics, conditions, and related files with `--context`). Re-scans cost zero API calls for unchanged files; changing a question re-queries, while changing weights or thresholds re-scores cached answers for free. `.qualitycheck/` ignores itself in git.
 - **Offline Token & Cost Estimation (`--preview`)**: Pre-calculate token usage and estimated cost before making any API calls. Fully offline, 0 network requests, and aware of cached files.
 - **Token & Cost Tracking**: Live runs report exact input/output tokens and cost ($0.042 / 1M input tokens), reporting $0.00 for cache hits.
-- **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or upstream base branch.
+- **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or a base branch, and with `--delta` / `--fail-on-regression` scores the base version too, so only regressions introduced by the change fail the gate.
+- **Cross-File Context (`--context`)**: Sends related files (tests, referenced and referencing files) alongside each file, so delegated work isn't scored as missing.
 - **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
 - **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
 
@@ -114,7 +116,7 @@ qualitycheck patch --base main --fail-on-regression 0.5
 With `--delta`, base versions go through the same content-addressed cache, so re-running after
 further edits only re-scores what changed. `--preview` includes the base versions in its estimate.
 
-### Cross-file context
+### 4. Cross-File Context
 
 Each file is scored on its own by default, so a thin controller that hands validation to a service
 can be marked down for "poor input validation" that lives one file over. `--context` (on `scan` and
@@ -134,7 +136,7 @@ characters per file. Expect roughly 2–3× the input tokens for files that get 
 the base side is shown the base versions of related files. Answers with and without context are
 cached separately.
 
-### 4. Triage & History
+### 5. Triage & History
 
 ```bash
 # Gaps triage: view files/metrics that failed their threshold in the latest run
@@ -150,7 +152,7 @@ qualitycheck diff <run-id-1> <run-id-2>
 qualitycheck runs list
 ```
 
-### 5. Profiles & Agent Introspection
+### 6. Profiles & Agent Introspection
 
 ```bash
 # List available profiles (built-in and ~/.config/qualitycheck/profiles/)
@@ -169,8 +171,8 @@ qualitycheck describe
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — informational scan, or `--strict` passed with all files meeting thresholds |
-| `1` | Strict failure — `--strict` was passed and at least one score fell below `fail_below` |
+| `0` | Success — informational scan, or all requested gates passed |
+| `1` | Gate failure — `--strict` and a score below `fail_below`, or `--fail-on-regression` and a regression |
 | `2` | Error — usage error, configuration/API key missing, or malformed profile |
 
 ---
@@ -246,18 +248,23 @@ qualitycheck/
 │   ├── config.rs      # ~/.config/qualitycheck/config.toml and API key resolution
 │   ├── profile.rs     # Profile data structures, JSON schema validation, metric hashing
 │   ├── walker.rs      # Directory walking respecting .gitignore, globs, and size limits
-│   ├── git.rs         # Git changed files detection for patch command
+│   ├── git.rs         # Changed files and their base-revision content for patch
+│   ├── context.rs     # Deterministic related-file selection for --context
 │   ├── cache.rs       # Blake3 content-addressed cache (.qualitycheck/cache/)
 │   ├── jev_client.rs  # Async batch client for TypeSafe AI Jev API
 │   ├── pipeline.rs    # Concurrent scan orchestration & offline preview estimation
-│   ├── scorer.rs      # Metric score normalization and weighted composite aggregation
+│   ├── scorer.rs      # Normalization, weighted composites, exclusions, regression detection
 │   ├── storage.rs     # Run persistence and run listing (.qualitycheck/runs/)
 │   ├── output.rs      # Table/JSON display, report persistence, triage & diffing
 │   └── error.rs       # Typed errors (thiserror) with exit codes
 └── tests/
-    ├── scorer_tests.rs
     ├── cache_tests.rs
-    └── cli_integration_tests.rs
+    ├── cli_integration_tests.rs
+    ├── context_tests.rs
+    ├── git_tests.rs
+    ├── profile_tests.rs
+    ├── scorer_tests.rs
+    └── fixtures/      # Superseded built-in profiles, for upgrade tests
 ```
 
 ---
