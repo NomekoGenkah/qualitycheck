@@ -865,12 +865,12 @@ fn spawn_content_aware_mock_jev(respond: fn(&serde_json::Value) -> serde_json::V
     url
 }
 
-/// Files containing "HIGH_QUALITY" score 4.8/5 on the quality profile; anything else 1.0/5.
+/// Files containing "HIGH_QUALITY" score 4.7/5 on the quality profile; anything else 1.0/5.
 fn quality_by_marker(body: &serde_json::Value) -> serde_json::Value {
     quality_answers(body["state"].to_string().contains("HIGH_QUALITY"))
 }
 
-/// Quality-profile answers worth 4.8/5 when `high`, 1.0/5 otherwise.
+/// Quality-profile answers worth 4.7/5 when `high`, 1.0/5 otherwise.
 fn quality_answers(high: bool) -> serde_json::Value {
     if high {
         serde_json::json!({ "answers": {
@@ -1045,7 +1045,7 @@ fn test_cli_patch_context_sends_the_delegated_service() {
     let run: serde_json::Value = serde_json::from_slice(&with_context.get_output().stdout).unwrap();
     let controller = file_entry(&run, "web/Controlador.java");
     assert_eq!(controller["context_files"], serde_json::json!(["core/Servicio.java"]));
-    assert_eq!(controller["profiles"][0]["composite_score"], 4.8);
+    assert_eq!(controller["profiles"][0]["composite_score"], 4.7);
     assert_eq!(
         file_entry(&run, "core/Servicio.java")["context_files"],
         serde_json::json!(["web/Controlador.java"])

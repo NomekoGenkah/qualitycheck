@@ -12,7 +12,7 @@ Designed to be run by humans directly, in CI pipelines, or invoked by AI coding 
 
 ## Key Features
 
-- **Deterministic Aggregation**: Jev returns raw typed metric values (`scale`, `enum`, `binary`) with calibrated confidence. All aggregation (weighted averages, threshold comparisons, confidence and applicability exclusions, regression gating) is calculated deterministically in Rust.
+- **Deterministic Aggregation**: Jev returns typed answers (`scale`, `enum`, `binary`) with calibrated probabilities. All aggregation (probability-weighted metric scores, weighted composites, threshold comparisons, confidence and applicability exclusions, regression gating) is calculated deterministically in Rust.
 - **Rubric-Described Metrics**: Every built-in metric describes each possible answer as a concrete situation, and can declare when it applies (`applies_when`), so a file isn't scored on concerns it doesn't own. Low-confidence answers are reported but kept out of the composite.
 - **Content-Addressed Caching**: Keyed by `blake3(file_content)` plus a hash of what is asked (questions, rubrics, conditions, and related files with `--context`). Re-scans cost zero API calls for unchanged files; changing a question re-queries, while changing weights or thresholds re-scores cached answers for free. `.qualitycheck/` ignores itself in git.
 - **Offline Token & Cost Estimation (`--preview`)**: Pre-calculate token usage and estimated cost before making any API calls. Fully offline, 0 network requests, and aware of cached files.
@@ -227,6 +227,14 @@ where you can edit them; unedited copies are refreshed when a new release improv
   from the composite score: they are still reported, flagged `excluded_low_confidence`. If every
   metric of a profile is excluded, the profile is reported `inconclusive` and does not fail `--strict`.
 - `scale` ranges may span 2 to 10 levels (Jev's limit).
+
+Each answer is scored on 1–5 as the probability-weighted mean over every possible answer: Jev's
+`scale` score already is, `enum` answers average their options' scores by Jev's probability for each,
+and `binary` answers score `1 + 4 × P(good_value)`. A near-tie between "good" and "fair" therefore
+lands between them instead of jumping a whole option with whichever wins narrowly, which keeps
+`--delta` comparisons stable. The chosen option is still reported as `raw_value`, with the
+distribution under `probabilities`; `qualitycheck file` shows the likelier options, e.g.
+`input_validation: good (29% conf.) -> normalized: 3.1/5 [good 46% · fair 43%]`.
 
 Scoring policy (`weight`, `fail_below`, `min_confidence`, `good_value`, `score_map`) is not part of the
 cache key: changing it re-scores cached answers without new API calls. Changing a `question`,

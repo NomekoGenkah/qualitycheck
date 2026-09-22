@@ -59,9 +59,10 @@ In the JSON report, `regressions` lists what the change made worse (`kind`: `dro
 `below_threshold_without_base`); `file_diffs` has composite and metric deltas per changed file
 (`old_composite` is `null` for files without a base version).
 
-Small deltas can be noise: a metric answered at low confidence (below ~0.5) may flip between
-neighbouring options on near-identical code. Use an allowance of at least `0.5`, and check a
-metric's `confidence` in the working-tree run before treating its change as real.
+Metric scores are probability-weighted, so an uncertain answer that flips its top option between
+near-identical versions moves the score only slightly. Composite changes of 0.1–0.2 on files the
+change barely touched are still normal model variation: use an allowance of about `0.5`, and look at
+the metric deltas in `file_diffs` before treating a small drop as real.
 
 `--context` costs roughly 2–3× the input tokens for files that get related files; check what would
 be attached with `--context --preview --full` first.
@@ -138,6 +139,9 @@ qualitycheck scan src/ --profile quality,security --format json
 - `0`: Scan succeeded and all files met thresholds (or running in informational mode without `--strict`).
 - `1`: Gate failure — with `--strict`, a file scored below its profile's `fail_below`; with `--fail-on-regression`, the change introduced a regression.
 - `2`: Configuration or usage error (e.g. missing API key, invalid profile).
+
+`normalized_score` is the probability-weighted score; `raw_value` is only Jev's top pick, and for
+enum metrics `probabilities` shows how close the alternatives were. Judge by `normalized_score`.
 
 Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition doesn't hold for the
 file, e.g. input validation in a file that receives no external input) or

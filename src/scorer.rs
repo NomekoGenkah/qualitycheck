@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -18,6 +18,10 @@ pub struct MetricEvaluation {
     pub raw_value: RawMetricValue,
     pub confidence: f64,
     pub normalized_score: f64,
+    /// Jev's probability per possible answer (enum and binary metrics), which
+    /// `normalized_score` averages over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probabilities: Option<BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<[f64; 2]>,
     /// Confidence fell below the profile's `min_confidence`, so this metric is reported but
@@ -69,8 +73,8 @@ pub struct FileEvaluation {
 /// Bumped whenever the same raw answers would produce different composite scores, so runs
 /// scored under different rules aren't silently compared. Version 0 (legacy, field absent)
 /// under-scored every scale metric by one level; version 1 counted every metric regardless of
-/// confidence.
-pub const SCORING_VERSION: u32 = 2;
+/// confidence; version 2 scored enum and binary answers by their top pick alone.
+pub const SCORING_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanRunResult {
@@ -130,7 +134,12 @@ fn normalize_enum_value(metric: &Metric, value: &RawMetricValue) -> f64 {
     let RawMetricValue::Enum(s) = value else {
         return 1.0;
     };
+    enum_option_score(metric, s)
+}
 
+/// Score of one enum option on [1, 5]: from `score_map` when given, else by its position in
+/// `options` (ascending, or descending for low/none/minimal … high/critical/severe scales).
+fn enum_option_score(metric: &Metric, s: &str) -> f64 {
     if let Some(map) = &metric.score_map
         && let Some(score) = map.get(s) {
             return score.clamp(1.0, 5.0);
@@ -164,6 +173,34 @@ fn normalize_enum_value(metric: &Metric, value: &RawMetricValue) -> f64 {
     }
 }
 
+/// Score of a metric answer on [1, 5]. Enum and binary answers that carry Jev's probabilities
+/// score as the probability-weighted mean over every possible answer, as scale answers already
+/// do, so a near-tie between two options lands between them instead of jumping with whichever
+/// option narrowly wins. Answers without probabilities score by their chosen value.
+pub fn score_metric_answer(metric: &Metric, answer: &CachedMetricResult) -> f64 {
+    let expected = answer.probabilities.as_ref().and_then(|probabilities| match metric.metric_type {
+        MetricType::Enum => expected_enum_score(metric, probabilities),
+        MetricType::Binary => probabilities.get("true").map(|&p_true| {
+            let p_good = if metric.good_value.unwrap_or(false) { p_true } else { 1.0 - p_true };
+            1.0 + 4.0 * p_good.clamp(0.0, 1.0)
+        }),
+        MetricType::Scale => None,
+    });
+    expected.unwrap_or_else(|| normalize_metric_score(metric, &answer.value))
+}
+
+fn expected_enum_score(metric: &Metric, probabilities: &BTreeMap<String, f64>) -> Option<f64> {
+    let options = metric.options.as_ref()?;
+    let (mut weighted, mut total) = (0.0, 0.0);
+    for option in options {
+        if let Some((_, &p)) = probabilities.iter().find(|(key, _)| key.eq_ignore_ascii_case(option)) {
+            weighted += p * enum_option_score(metric, option);
+            total += p;
+        }
+    }
+    (total > 0.0).then(|| weighted / total)
+}
+
 /// Evaluates all metrics for a file against the provided profiles and calculates composite scores.
 pub fn evaluate_file_with_metrics(
     profiles: &[Profile],
@@ -179,7 +216,7 @@ pub fn evaluate_file_with_metrics(
 
         for metric in &profile.metrics {
             if let Some(cached) = metric_results.get(&metric.id) {
-                let normalized = normalize_metric_score(metric, &cached.value);
+                let normalized = score_metric_answer(metric, cached);
                 let weight = if metric.weight > 0.0 { metric.weight } else { 1.0 };
                 let excluded_low_confidence = cached.confidence < min_confidence;
                 let not_applicable = matches!(
@@ -200,6 +237,7 @@ pub fn evaluate_file_with_metrics(
                     raw_value: cached.value.clone(),
                     confidence: cached.confidence,
                     normalized_score: normalized,
+                    probabilities: cached.probabilities.clone(),
                     range: metric.range,
                     excluded_low_confidence,
                     not_applicable,

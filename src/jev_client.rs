@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::cache::{CachedMetricResult, JevUsage, RawMetricValue};
+use crate::cache::{binary_probabilities, CachedMetricResult, JevUsage, RawMetricValue};
 use crate::error::JevError;
 use crate::profile::{Metric, MetricType, Rubric};
 
@@ -262,6 +262,7 @@ fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevE
             Ok(CachedMetricResult {
                 value: RawMetricValue::Scale(metric.scale_min_level() as f64 + position),
                 confidence: confidence.clamp(0.0, 1.0),
+                probabilities: None,
             })
         }
         MetricType::Enum => {
@@ -283,9 +284,22 @@ fn parse_answer(val: &Value, metric: &Metric) -> Result<CachedMetricResult, JevE
                 .and_then(|v| v.as_f64())
                 .unwrap_or(1.0);
 
+            // Probability per option; the scorer averages over it rather than trusting the top pick.
+            let probabilities: BTreeMap<String, f64> = val
+                .get("probabilities")
+                .and_then(|v| v.as_object())
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|(option, p)| Some((option.clone(), p.as_f64()?.clamp(0.0, 1.0))))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             Ok(CachedMetricResult {
                 value: RawMetricValue::Enum(choice_str),
                 confidence: confidence.clamp(0.0, 1.0),
+                probabilities: (!probabilities.is_empty()).then_some(probabilities),
             })
         }
         MetricType::Binary => parse_binary(val, &metric.id),
@@ -303,6 +317,7 @@ fn parse_binary(val: &Value, id: &str) -> Result<CachedMetricResult, JevError> {
         return Ok(CachedMetricResult {
             value: RawMetricValue::Binary(b),
             confidence: conf.clamp(0.0, 1.0),
+            probabilities: None,
         });
     }
 
@@ -310,6 +325,7 @@ fn parse_binary(val: &Value, id: &str) -> Result<CachedMetricResult, JevError> {
         return Ok(CachedMetricResult {
             value: RawMetricValue::Binary(b),
             confidence: 1.0,
+            probabilities: None,
         });
     }
 
@@ -330,6 +346,7 @@ fn parse_binary(val: &Value, id: &str) -> Result<CachedMetricResult, JevError> {
     Ok(CachedMetricResult {
         value: RawMetricValue::Binary(prob >= 0.5),
         confidence: (2.0 * prob - 1.0).abs().clamp(0.0, 1.0),
+        probabilities: Some(binary_probabilities(prob)),
     })
 }
 
@@ -362,5 +379,26 @@ mod tests {
         assert_eq!(applies["type"], "noul");
         assert!(applies["instructions"].as_str().unwrap().starts_with("The file declares"));
         assert!(request.get("has_dead_code:applies").is_none());
+    }
+
+    #[test]
+    fn answers_keep_their_probability_distribution() {
+        let profile = load_profile("quality").unwrap();
+        let metric = |id: &str| profile.metrics.iter().find(|m| m.id == id).unwrap();
+
+        let choice = serde_json::json!({
+            "type": "choice",
+            "choice": "medium",
+            "probabilities": { "low": 0.3, "medium": 0.6, "high": 0.1 },
+            "confidence": 0.4
+        });
+        let parsed = parse_answer(&choice, metric("complexity_level")).unwrap();
+        assert_eq!(parsed.value, RawMetricValue::Enum("medium".to_string()));
+        assert_eq!(parsed.probabilities.unwrap()["low"], 0.3);
+
+        let noul = serde_json::json!({ "type": "noul", "noul": 0.2 });
+        let parsed = parse_answer(&noul, metric("has_dead_code")).unwrap();
+        assert_eq!(parsed.value, RawMetricValue::Binary(false));
+        assert_eq!(parsed.probabilities.unwrap()["true"], 0.2);
     }
 }

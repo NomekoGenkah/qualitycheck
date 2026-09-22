@@ -208,8 +208,9 @@ async fn evaluate_single_file(
     let (state, cache_scope) = evaluation_state(&file_bytes, path, project_root, &related, metrics_hash);
     let (cache_key, file_hash) = compute_cache_key(&file_bytes, &cache_scope);
 
-    let (metric_results, served_from_cache, usage) = if let Some(mut cached) = get_cached_result(project_root, &cache_key) {
-        upgrade_cached_result(&mut cached, metrics);
+    let cached = get_cached_result(project_root, &cache_key)
+        .and_then(|mut cached| upgrade_cached_result(&mut cached, metrics).then_some(cached));
+    let (metric_results, served_from_cache, usage) = if let Some(cached) = cached {
         (cached.metrics, true, cached.usage)
     } else {
         let eval_res = client
@@ -362,7 +363,8 @@ pub fn run_preview_pipeline_on_inputs(
         let (state, cache_scope) =
             evaluation_state(file_bytes, path, project_root, &input.related, &metrics_hash);
         let (cache_key, _) = compute_cache_key(file_bytes, &cache_scope);
-        let in_cache = get_cached_result(project_root, &cache_key).is_some();
+        let in_cache = get_cached_result(project_root, &cache_key)
+            .is_some_and(|mut cached| upgrade_cached_result(&mut cached, &all_metrics));
         let state_len = match &state {
             Value::String(text) => text.len(),
             other => other.to_string().len(),

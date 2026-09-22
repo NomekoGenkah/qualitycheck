@@ -76,6 +76,7 @@ fn test_cache_put_and_get() {
         CachedMetricResult {
             value: RawMetricValue::Scale(4.0),
             confidence: 0.95,
+            probabilities: None,
         },
     );
     metrics.insert(
@@ -83,6 +84,7 @@ fn test_cache_put_and_get() {
         CachedMetricResult {
             value: RawMetricValue::Binary(false),
             confidence: 0.98,
+            probabilities: None,
         },
     );
 
@@ -215,4 +217,53 @@ fn test_cache_write_creates_self_ignoring_state_dir() {
     let gitignore = tmp.path().join(".qualitycheck").join(".gitignore");
     let content = std::fs::read_to_string(gitignore).unwrap();
     assert!(content.lines().any(|l| l.trim() == "*"));
+}
+
+#[test]
+fn test_v2_entries_recover_binary_probabilities_but_not_enum_ones() {
+    let v2_json = |enum_answer: &str| {
+        format!(
+            r#"{{
+            "format_version": 2,
+            "file_hash": "f",
+            "metrics_hash": "m",
+            "timestamp": "2026-09-22T10:00:00Z",
+            "metrics": {{
+                "has_dead_code": {{ "value": false, "confidence": 0.9 }},
+                "complexity_level": {enum_answer}
+            }}
+        }}"#
+        )
+    };
+    let complexity = Metric {
+        id: "complexity_level".to_string(),
+        metric_type: MetricType::Enum,
+        question: "Q".to_string(),
+        weight: 1.0,
+        range: None,
+        options: Some(vec!["low".to_string(), "high".to_string()]),
+        good_value: None,
+        score_map: None,
+        rubric: None,
+        applies_when: None,
+    };
+    let metrics = [binary_metric("has_dead_code"), complexity];
+
+    // Binary: confidence |2p - 1| = 0.9 with verdict false gives p(true) = 0.05.
+    let mut binary_only: CachedFileResult =
+        serde_json::from_str(&v2_json(r#"{ "value": "low", "confidence": 0.8 }"#)).unwrap();
+    assert!(upgrade_cached_result(&mut binary_only, &metrics[..1]));
+    let p_true = binary_only.metrics["has_dead_code"].probabilities.as_ref().unwrap()["true"];
+    assert!((p_true - 0.05).abs() < 1e-9);
+
+    // An enum answer stored without its distribution can't be rescored: re-evaluate the file.
+    let mut with_enum: CachedFileResult =
+        serde_json::from_str(&v2_json(r#"{ "value": "low", "confidence": 0.8 }"#)).unwrap();
+    assert!(!upgrade_cached_result(&mut with_enum, &metrics));
+
+    // Current entries are usable even when Jev returned no distribution.
+    let mut current: CachedFileResult =
+        serde_json::from_str(&v2_json(r#"{ "value": "low", "confidence": 0.8 }"#)).unwrap();
+    current.format_version = CACHE_FORMAT_VERSION;
+    assert!(upgrade_cached_result(&mut current, &metrics));
 }

@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use qualitycheck::cache::{CachedMetricResult, RawMetricValue};
 use qualitycheck::profile::{Metric, MetricType, Profile};
 use qualitycheck::scorer::{
-    evaluate_file_with_metrics, find_regressions, normalize_metric_score, FileEvaluation,
+    evaluate_file_with_metrics, find_regressions, normalize_metric_score, score_metric_answer,
+    FileEvaluation,
     ProfileEvaluation, RegressionKind, RunUsage, ScanRunResult, SCORING_VERSION,
 };
 
@@ -202,6 +203,7 @@ fn test_composite_score_calculation() {
         CachedMetricResult {
             value: RawMetricValue::Scale(4.0),
             confidence: 0.87,
+            probabilities: None,
         },
     );
     // has_dead_code = false (wt 0.5) -> 5.0
@@ -210,6 +212,7 @@ fn test_composite_score_calculation() {
         CachedMetricResult {
             value: RawMetricValue::Binary(false),
             confidence: 0.95,
+            probabilities: None,
         },
     );
     // complexity_level = "medium" (wt 1.5) -> 5.0 - (1/3)*4.0 = 3.6666...
@@ -218,6 +221,7 @@ fn test_composite_score_calculation() {
         CachedMetricResult {
             value: RawMetricValue::Enum("medium".to_string()),
             confidence: 0.90,
+            probabilities: None,
         },
     );
 
@@ -263,6 +267,7 @@ fn answers(naming: (f64, f64), cohesion: (f64, f64)) -> HashMap<String, CachedMe
             CachedMetricResult {
                 value: RawMetricValue::Scale(value),
                 confidence,
+                probabilities: None,
             },
         );
     }
@@ -319,6 +324,7 @@ fn test_not_applicable_metric_is_excluded_from_composite() {
         CachedMetricResult {
             value: RawMetricValue::Binary(false),
             confidence: 0.8,
+            probabilities: None,
         },
     );
     let evals = evaluate_file_with_metrics(std::slice::from_ref(&profile), &results);
@@ -409,4 +415,89 @@ fn test_find_regressions_reports_only_what_the_change_made_worse() {
     assert!(find_regressions(&base, &head, 0.0)
         .iter()
         .any(|r| r.relative_path == "already_low.rs"));
+}
+
+fn enum_answer(choice: &str, distribution: &[(&str, f64)]) -> CachedMetricResult {
+    CachedMetricResult {
+        value: RawMetricValue::Enum(choice.to_string()),
+        confidence: 0.3,
+        probabilities: Some(distribution.iter().map(|(o, p)| (o.to_string(), *p)).collect()),
+    }
+}
+
+fn input_validation_metric() -> Metric {
+    Metric {
+        id: "input_validation".to_string(),
+        metric_type: MetricType::Enum,
+        question: "Input validation?".to_string(),
+        weight: 1.5,
+        range: None,
+        options: Some(["poor", "fair", "good", "high"].map(String::from).to_vec()),
+        good_value: None,
+        score_map: None,
+        rubric: None,
+        applies_when: None,
+    }
+}
+
+#[test]
+fn test_near_tie_between_options_does_not_swing_the_score() {
+    // Near-identical code answered "good" by a hair, then "fair" by a hair (as observed on a
+    // real controller at ~0.32 confidence). Scoring the top pick alone swings 1.3 points.
+    let metric = input_validation_metric();
+    let base = enum_answer("good", &[("poor", 0.05), ("fair", 0.40), ("good", 0.45), ("high", 0.10)]);
+    let head = enum_answer("fair", &[("poor", 0.05), ("fair", 0.45), ("good", 0.40), ("high", 0.10)]);
+
+    let top_pick_swing = normalize_metric_score(&metric, &base.value) - normalize_metric_score(&metric, &head.value);
+    assert!(top_pick_swing > 1.3);
+
+    let swing = score_metric_answer(&metric, &base) - score_metric_answer(&metric, &head);
+    assert!(swing.abs() < 0.1, "expected-value swing was {swing}");
+}
+
+#[test]
+fn test_enum_answer_scores_as_probability_weighted_mean() {
+    let metric = input_validation_metric();
+    // poor=1, fair=2.33, good=3.67, high=5.
+    let split = enum_answer("good", &[("good", 0.5), ("high", 0.5)]);
+    assert!((score_metric_answer(&metric, &split) - (3.0 + 2.0 / 3.0 + 5.0) / 2.0).abs() < 1e-9);
+
+    // Option keys match case-insensitively; probabilities are renormalized over known options.
+    let partial = enum_answer("high", &[("HIGH", 0.6), ("unknown", 0.4)]);
+    assert!((score_metric_answer(&metric, &partial) - 5.0).abs() < 1e-9);
+
+    // Without a distribution the chosen option is scored alone.
+    let bare = CachedMetricResult {
+        value: RawMetricValue::Enum("fair".to_string()),
+        confidence: 0.9,
+        probabilities: None,
+    };
+    assert!((score_metric_answer(&metric, &bare) - (1.0 + 4.0 / 3.0)).abs() < 1e-9);
+}
+
+#[test]
+fn test_binary_answer_scores_by_probability_of_the_good_outcome() {
+    let dead_code = Metric {
+        id: "has_dead_code".to_string(),
+        metric_type: MetricType::Binary,
+        question: "Dead code?".to_string(),
+        weight: 0.5,
+        range: None,
+        options: None,
+        good_value: Some(false),
+        score_map: None,
+        rubric: None,
+        applies_when: None,
+    };
+    let answer = |p_true: f64| CachedMetricResult {
+        value: RawMetricValue::Binary(p_true >= 0.5),
+        confidence: (2.0 * p_true - 1.0).abs(),
+        probabilities: Some(qualitycheck::cache::binary_probabilities(p_true)),
+    };
+
+    assert!((score_metric_answer(&dead_code, &answer(0.05)) - 4.8).abs() < 1e-9);
+    assert!((score_metric_answer(&dead_code, &answer(0.5)) - 3.0).abs() < 1e-9);
+    // Just either side of the verdict boundary: nearly the same score, not 5 vs 1.
+    let swing = score_metric_answer(&dead_code, &answer(0.49)) - score_metric_answer(&dead_code, &answer(0.51));
+    assert!(swing.abs() < 0.1);
 }

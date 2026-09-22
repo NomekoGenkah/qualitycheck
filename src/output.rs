@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::RawMetricValue;
 use crate::pipeline::ScanPreviewResult;
+use crate::profile::MetricType;
 use crate::scorer::{
     round_to_tenth, FileEvaluation, MetricEvaluation, Regression, RegressionKind, RunUsage,
     ScanRunResult,
@@ -200,11 +201,12 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                     let val_str = format_metric_display(metric);
                     let conf_pct = (metric.confidence * 100.0).round() as u64;
                     let line = format!(
-                        "  {}: {} ({}% conf.) -> normalized: {:.1}/5{}",
+                        "  {}: {} ({}% conf.) -> normalized: {:.1}/5{}{}",
                         metric.metric_id,
                         val_str,
                         conf_pct,
                         metric.normalized_score,
+                        format_distribution(metric),
                         excluded_suffix(metric, profile.min_confidence)
                     );
 
@@ -618,6 +620,31 @@ pub fn print_patch_delta_report(
             }
         }
     }
+}
+
+/// The likelier options of an enum answer, e.g. ` [good 45% · fair 40%]`, which explain a
+/// normalized score that falls between options. Empty when one option holds nearly everything.
+fn format_distribution(metric: &MetricEvaluation) -> String {
+    if metric.metric_type != MetricType::Enum {
+        return String::new();
+    }
+    let Some(probabilities) = &metric.probabilities else {
+        return String::new();
+    };
+    let mut likely: Vec<(&String, f64)> = probabilities
+        .iter()
+        .map(|(option, p)| (option, *p))
+        .filter(|(_, p)| *p >= 0.1)
+        .collect();
+    if likely.len() < 2 {
+        return String::new();
+    }
+    likely.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let parts: Vec<String> = likely
+        .iter()
+        .map(|(option, p)| format!("{} {}%", option, (p * 100.0).round() as u64))
+        .collect();
+    format!(" [{}]", parts.join(" · "))
 }
 
 fn excluded_suffix(metric: &MetricEvaluation, min_confidence: f64) -> String {
