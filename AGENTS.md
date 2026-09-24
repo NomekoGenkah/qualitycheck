@@ -22,6 +22,7 @@ Welcome! This document provides AI coding agents (Claude Code, Cursor, OpenCode,
   - `src/scorer.rs`: Metric normalization and weighted composite aggregation.
   - `src/storage.rs`: Historical run persistence under `.qualitycheck/runs/`.
   - `src/output.rs`: Terminal table rendering & machine-readable JSON formatting.
+  - `src/ci_report.rs`: GitHub Actions annotations and Markdown summary (`--format github|markdown`).
 
 ---
 

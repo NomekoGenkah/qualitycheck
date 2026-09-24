@@ -181,10 +181,7 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
         _ => project_root.clone(),
     };
 
-    let output_format = match args.format.to_lowercase().as_str() {
-        "json" => OutputFormat::Json,
-        _ => OutputFormat::Table,
-    };
+    let output_format = OutputFormat::parse(&args.format);
 
     let mut inputs: Vec<ScanInput> = files.into_iter().map(ScanInput::from_disk).collect();
     if args.context {
@@ -300,10 +297,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
 
     let profiles = load_profiles_by_names(&profile_names)?;
 
-    let output_format = match args.format.to_lowercase().as_str() {
-        "json" => OutputFormat::Json,
-        _ => OutputFormat::Table,
-    };
+    let output_format = OutputFormat::parse(&args.format);
 
     let mut head_inputs: Vec<ScanInput> = changed_files
         .iter()
@@ -433,7 +427,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         file_diffs: diff_runs(&base_result, &head_result).file_diffs,
         usage: combine_usage(&base_result.usage, &head_result.usage),
     };
-    print_patch_delta_report(&report, output_format, args.no_color, saved_path.as_deref());
+    print_patch_delta_report(&report, &head_result, output_format, args.no_color, saved_path.as_deref());
 
     Ok(if failed { 1 } else { 0 })
 }
@@ -466,10 +460,7 @@ fn handle_gaps(args: GapsArgs) -> Result<i32, QualityCheckError> {
 
     let gaps_result = filter_gaps(&run_result);
 
-    let output_format = match args.format.to_lowercase().as_str() {
-        "json" => OutputFormat::Json,
-        _ => OutputFormat::Table,
-    };
+    let output_format = OutputFormat::parse(&args.format);
 
     if gaps_result.files.is_empty() {
         if output_format == OutputFormat::Json {
@@ -487,10 +478,7 @@ fn handle_gaps(args: GapsArgs) -> Result<i32, QualityCheckError> {
 async fn handle_file(args: FileArgs) -> Result<i32, QualityCheckError> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let output_format = match args.format.to_lowercase().as_str() {
-        "json" => OutputFormat::Json,
-        _ => OutputFormat::Table,
-    };
+    let output_format = OutputFormat::parse(&args.format);
 
     // Try loading from specified run or latest run
     let target_file_str = args.path.to_string_lossy();
@@ -553,10 +541,7 @@ fn handle_diff(args: DiffArgs) -> Result<i32, QualityCheckError> {
 
     let diff_report = diff_runs(&run_a, &run_b);
 
-    let output_format = match args.format.to_lowercase().as_str() {
-        "json" => OutputFormat::Json,
-        _ => OutputFormat::Table,
-    };
+    let output_format = OutputFormat::parse(&args.format);
 
     print_diff_report(&diff_report, output_format, args.no_color);
     Ok(0)

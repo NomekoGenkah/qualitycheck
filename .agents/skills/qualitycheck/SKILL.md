@@ -123,8 +123,8 @@ changed file against its base version in one run. To compare arbitrary points in
 
 | Command | Purpose | Key Flags |
 |---|---|---|
-| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--explain`, `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
-| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--fail-on-metric-regression <POINTS>`, `--explain`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json>` |
+| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--explain`, `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore`, `--format <table\|json\|github\|markdown>` |
+| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--fail-on-metric-regression <POINTS>`, `--explain`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json\|github\|markdown>` |
 | `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck diff <RUN-A> <RUN-B>` | Compare two historical runs for score deltas | `--format <table\|json>` |

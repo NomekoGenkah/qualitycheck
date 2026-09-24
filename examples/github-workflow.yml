@@ -1,0 +1,58 @@
+# Scores the files a pull request changes and fails on the regressions it introduces, with
+# findings annotated on the changed files and a summary on the run page.
+#
+# Copy to .github/workflows/qualitycheck.yml and add a JEV_API_KEY repository secret.
+name: qualitycheck
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  qualitycheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # `patch --base` compares against the base branch, so it needs its history
+
+      - name: Resolve qualitycheck version
+        id: version
+        run: echo "sha=$(git ls-remote https://github.com/NomekoGenkah/qualitycheck refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache qualitycheck binary
+        id: binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/qualitycheck
+          key: qualitycheck-bin-${{ runner.os }}-${{ steps.version.outputs.sha }}
+
+      - name: Install qualitycheck
+        if: steps.binary.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/NomekoGenkah/qualitycheck --rev ${{ steps.version.outputs.sha }}
+
+      # Jev's answers vary slightly between requests even for identical code. Reusing cached
+      # answers keeps unchanged content, such as the base side of each changed file, scoring
+      # exactly the same from run to run, and costs nothing.
+      - name: Cache Jev answers
+        uses: actions/cache@v4
+        with:
+          path: .qualitycheck/cache
+          key: qualitycheck-answers-${{ github.run_id }}
+          restore-keys: qualitycheck-answers-
+
+      - name: Score the change
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -z "$JEV_API_KEY" ]; then
+            echo "::notice title=qualitycheck::Skipped: JEV_API_KEY isn't available (pull requests from forks don't receive secrets)."
+            exit 0
+          fi
+          qualitycheck patch --base "origin/$BASE_REF" \
+            --profile quality,security,qa \
+            --fail-on-regression 0.5 --fail-on-metric-regression 1.0 \
+            --explain --format github

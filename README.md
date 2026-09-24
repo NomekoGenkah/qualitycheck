@@ -20,6 +20,7 @@ Designed to be run by humans directly, in CI pipelines, or invoked by AI coding 
 - **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or a base branch, and with `--delta` / `--fail-on-regression` scores the base version too, so only regressions introduced by the change fail the gate.
 - **Finding Locations (`--explain`)**: Asks Jev which regions of a file are responsible for each failing metric and reports them as line ranges.
 - **Cross-File Context (`--context`)**: Sends related files (tests, referenced and referencing files) alongside each file, so delegated work isn't scored as missing.
+- **CI-Ready**: `--format github` annotates findings on the changed lines and writes a step summary; `--format markdown` renders the summary for pull request comments. See [`examples/github-workflow.yml`](examples/github-workflow.yml).
 - **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
 - **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
 
@@ -185,7 +186,36 @@ include it: which metrics fail is only known after scoring. If an explain reques
 are still reported, with a notice on stderr. With `patch --delta`, only the working-tree side is
 explained.
 
-### 6. Triage & History
+### 6. CI Integration
+
+`--format github` (on `scan`, `patch`, and `gaps`) prints GitHub Actions annotations: one per metric
+that scores below its threshold, placed on the region `--explain` located, or on the file. Findings
+that fail the gate are errors (with `--fail-on-regression` / `--fail-on-metric-regression`, only
+regressions; otherwise metrics of profiles below `fail_below`), and the rest are warnings, largest
+shortfall first, up to the 10 per level GitHub shows per step. When `$GITHUB_STEP_SUMMARY` is set, a
+Markdown summary is also appended to it: composites per file and profile (with score changes under
+`patch --delta`) and every finding. `--format markdown` prints that summary alone, for a pull request
+comment or another CI system. Paths are made relative to `$GITHUB_WORKSPACE`, or the current
+directory.
+
+[`examples/github-workflow.yml`](examples/github-workflow.yml) runs it on pull requests:
+
+```yaml
+- name: Score the change
+  env:
+    JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+    BASE_REF: ${{ github.base_ref }}
+  run: |
+    qualitycheck patch --base "origin/$BASE_REF" --profile quality,security,qa \
+      --fail-on-regression 0.5 --fail-on-metric-regression 1.0 --explain --format github
+```
+
+It checks out full history (`patch --base` needs the base branch), caches the built binary, and
+keeps `.qualitycheck/cache` between runs, so unchanged content, such as the base side of each changed
+file, reuses its answers instead of drawing new, slightly different ones. It skips with a notice
+when the secret isn't available, as for pull requests from forks.
+
+### 7. Triage & History
 
 ```bash
 # Gaps triage: view files/metrics that failed their threshold in the latest run
@@ -201,7 +231,7 @@ qualitycheck diff <run-id-1> <run-id-2>
 qualitycheck runs list
 ```
 
-### 7. Profiles & Agent Introspection
+### 8. Profiles & Agent Introspection
 
 ```bash
 # List available profiles (built-in and ~/.config/qualitycheck/profiles/)
@@ -314,6 +344,7 @@ cache key: changing it re-scores cached answers without new API calls. Changing 
 qualitycheck/
 ├── Cargo.toml
 ├── profiles/          # Default profiles (qa.json, security.json, quality.json)
+├── examples/          # GitHub Actions workflow
 ├── skills/            # Open agent skill package
 ├── src/
 │   ├── lib.rs         # Library root
@@ -331,6 +362,7 @@ qualitycheck/
 │   ├── scorer.rs      # Normalization, weighted composites, exclusions, regression detection
 │   ├── storage.rs     # Run persistence and run listing (.qualitycheck/runs/)
 │   ├── output.rs      # Table/JSON display, report persistence, triage & diffing
+│   ├── ci_report.rs   # GitHub Actions annotations and Markdown summary
 │   └── error.rs       # Typed errors (thiserror) with exit codes
 └── tests/
     ├── cache_tests.rs

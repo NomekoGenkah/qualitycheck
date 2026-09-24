@@ -61,8 +61,8 @@ pub struct ScanArgs {
     #[arg(long, default_value = "quality")]
     pub profile: String,
 
-    /// Output format: table or json [default: table]
-    #[arg(long, default_value = "table", value_parser = ["table", "json"])]
+    /// Output format: table, json, github (Actions annotations and step summary), or markdown
+    #[arg(long, default_value = "table", value_parser = ["table", "json", "github", "markdown"])]
     pub format: String,
 
     /// Override the default persisted report location/name
@@ -141,8 +141,8 @@ pub struct PatchArgs {
     #[arg(long, default_value = "quality")]
     pub profile: String,
 
-    /// Output format: table or json [default: table]
-    #[arg(long, default_value = "table", value_parser = ["table", "json"])]
+    /// Output format: table, json, github (Actions annotations and step summary), or markdown
+    #[arg(long, default_value = "table", value_parser = ["table", "json", "github", "markdown"])]
     pub format: String,
 
     /// Override the default persisted report location/name
@@ -247,8 +247,8 @@ pub struct GapsArgs {
     #[arg(long)]
     pub run: Option<String>,
 
-    /// Output format: table or json [default: table]
-    #[arg(long, default_value = "table", value_parser = ["table", "json"])]
+    /// Output format: table, json, github (Actions annotations and step summary), or markdown
+    #[arg(long, default_value = "table", value_parser = ["table", "json", "github", "markdown"])]
     pub format: String,
 
     /// Force-disable colored output

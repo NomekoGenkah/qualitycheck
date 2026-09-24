@@ -1163,6 +1163,79 @@ fn test_cli_scan_explain_failure_keeps_the_scores() {
 }
 
 #[test]
+fn test_cli_scan_github_format_annotates_hotspots_and_writes_the_step_summary() {
+    let url = spawn_content_aware_mock_jev(cohesion_located_in_second_region);
+    let tmp = tempdir().unwrap();
+    fs::create_dir(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src").join("lib.rs"), many_functions()).unwrap();
+    let config = tempdir().unwrap();
+    let summary = tmp.path().join("summary.md");
+    fs::write(&summary, "earlier step\n").unwrap();
+
+    let assert = Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("QUALITYCHECK_CONFIG_DIR", config.path())
+        .env("JEV_API_KEY", "test_key")
+        .env("JEV_API_URL", &url)
+        .env("GITHUB_WORKSPACE", tmp.path())
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .args(["scan", "src", "--explain", "--format", "github"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+
+    // Paths are repository-relative although the scan target was `src`; the quality profile
+    // passes (4.0), so its low metric is a warning, pinned to the region --explain located.
+    let annotations: Vec<&str> = stdout.lines().collect();
+    assert_eq!(annotations.len(), 1, "{stdout}");
+    assert!(annotations[0].starts_with("::warning file=src/lib.rs,line="), "{stdout}");
+    assert!(annotations[0].contains(",title=qualitycheck%3A cohesion 1.0/5 (quality)::The file mixes many"));
+
+    let summary = fs::read_to_string(&summary).unwrap();
+    assert!(summary.starts_with("earlier step\n## qualitycheck"), "{summary}");
+    assert!(summary.contains("✅ Every file meets its profile thresholds · 1 file(s) · 1 finding(s)"));
+    assert!(summary.contains("| `src/lib.rs` | 4.0 |"));
+    assert!(summary.contains("| ⚠️ | `src/lib.rs` | cohesion 1.0/5 (quality) | L"));
+}
+
+#[test]
+fn test_cli_patch_ci_formats_report_regressions_as_errors() {
+    let url = spawn_content_aware_mock_jev(cohesion_by_marker);
+    let (tmp, _repo) = repo_with_quality_history();
+    let root = tmp.path();
+    let config = tempdir().unwrap();
+    fs::write(root.join("controller.rs"), "// WORSE_COHESION\npub fn handle() {}\n").unwrap();
+    let gates = ["--base", "HEAD", "--fail-on-regression", "0.5", "--fail-on-metric-regression", "1.0"];
+
+    let assert = Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(root)
+        .env("QUALITYCHECK_CONFIG_DIR", config.path())
+        .env("JEV_API_KEY", "test_key")
+        .env("JEV_API_URL", &url)
+        .env("GITHUB_WORKSPACE", root)
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .arg("patch")
+        .args(gates)
+        .args(["--format", "github"])
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    // cohesion 5 -> 3 is a metric regression; it isn't below fail_below, but it failed the gate.
+    assert_eq!(
+        stdout.trim(),
+        "::error file=controller.rs,title=qualitycheck%3A cohesion 3.0/5 (quality)::The file mostly serves one purpose, with one or two parts that would fit better in another module."
+    );
+
+    patch_cmd(root, config.path(), &url, &[&gates[..], &["--format", "markdown"]].concat())
+        .code(1)
+        .stdout(predicate::str::contains("❌ 1 regression(s) vs `HEAD` · 1 file(s) · 1 finding(s)"))
+        .stdout(predicate::str::contains("| `controller.rs` | 5.0 → 4.5 (-0.5) |"))
+        .stdout(predicate::str::contains("| ❌ | `controller.rs` | cohesion 3.0/5 (quality) | – |"));
+}
+
+#[test]
 fn test_cli_patch_delta_preview_counts_both_sides_offline() {
     let (tmp, _repo) = repo_with_quality_history();
     let root = tmp.path();

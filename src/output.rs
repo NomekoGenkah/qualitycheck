@@ -19,6 +19,21 @@ pub use crate::storage::{get_runs_dir, list_saved_runs, load_saved_run, persist_
 pub enum OutputFormat {
     Table,
     Json,
+    /// GitHub Actions annotations, plus the Markdown summary in the step summary.
+    Github,
+    Markdown,
+}
+
+impl OutputFormat {
+    /// Parses a `--format` value; anything unrecognized is `Table` (clap validates the values).
+    pub fn parse(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "json" => Self::Json,
+            "github" => Self::Github,
+            "markdown" => Self::Markdown,
+            _ => Self::Table,
+        }
+    }
 }
 
 /// Scores are `None` on the old side when the file, profile, or metric didn't exist there.
@@ -84,6 +99,8 @@ pub fn print_scan_result(
             let json = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
             println!("{}", json);
         }
+        OutputFormat::Github => crate::ci_report::print_github(result, None),
+        OutputFormat::Markdown => crate::ci_report::print_markdown(result, None),
         OutputFormat::Table => {
             let colors_enabled = !no_color && io::stdout().is_terminal();
 
@@ -194,7 +211,8 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
             let json = serde_json::to_string_pretty(file).unwrap_or_else(|_| "{}".to_string());
             println!("{}", json);
         }
-        OutputFormat::Table => {
+        // The CI formats apply to scans; anything else is shown as a table.
+        OutputFormat::Table | OutputFormat::Github | OutputFormat::Markdown => {
             let colors_enabled = !no_color && io::stdout().is_terminal();
             println!("{}", file.relative_path);
             if let Some(u) = &file.usage {
@@ -377,7 +395,8 @@ pub fn print_diff_report(report: &RunDiffReport, format: OutputFormat, no_color:
             let json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
             println!("{}", json);
         }
-        OutputFormat::Table => {
+        // The CI formats apply to scans; anything else is shown as a table.
+        OutputFormat::Table | OutputFormat::Github | OutputFormat::Markdown => {
             let colors_enabled = !no_color && io::stdout().is_terminal();
             println!("Comparing runs: {} -> {}", report.old_run_id, report.new_run_id);
             println!();
@@ -397,7 +416,8 @@ pub fn print_preview_result(
             let json = serde_json::to_string_pretty(preview).unwrap_or_else(|_| "{}".to_string());
             println!("{}", json);
         }
-        OutputFormat::Table => {
+        // The CI formats apply to scans; anything else is shown as a table.
+        OutputFormat::Table | OutputFormat::Github | OutputFormat::Markdown => {
             let colors_enabled = !no_color && io::stdout().is_terminal();
 
             let profiles_str = preview.profiles.join(", ");
@@ -575,8 +595,10 @@ fn format_score_change(old: Option<f64>, new: f64, delta: Option<f64>) -> String
     }
 }
 
+/// `head` is the working-tree run the report compares, which the CI formats annotate.
 pub fn print_patch_delta_report(
     report: &PatchDeltaReport,
+    head: &ScanRunResult,
     format: OutputFormat,
     no_color: bool,
     saved_path: Option<&Path>,
@@ -586,6 +608,8 @@ pub fn print_patch_delta_report(
             let json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
             println!("{}", json);
         }
+        OutputFormat::Github => crate::ci_report::print_github(head, Some(report)),
+        OutputFormat::Markdown => crate::ci_report::print_markdown(head, Some(report)),
         OutputFormat::Table => {
             let colors_enabled = !no_color && io::stdout().is_terminal();
             let new_count = report.file_diffs.iter().filter(|f| f.is_new).count();

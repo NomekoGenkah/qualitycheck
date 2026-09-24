@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod ci_report;
 pub mod cli;
 pub mod config;
 pub mod context;
