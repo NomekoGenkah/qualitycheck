@@ -182,7 +182,11 @@ fn test_cli_scan_with_mock_jev_server() {
         .arg("auth.rs")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Composite score: 4.6/5 [PASS]"));
+        .stdout(predicate::str::contains("Composite score: 4.6/5 [PASS]"))
+        // Score position 3.0 is level 4 of naming_clarity's rubric.
+        .stdout(predicate::str::contains(
+            "↳ Nearly every name describes its purpose clearly, with only a few vague or inconsistent spots.",
+        ));
 
     // 5. Run table format scan to verify table output
     let mut table_cmd = Command::cargo_bin("qualitycheck").unwrap();
@@ -197,7 +201,9 @@ fn test_cli_scan_with_mock_jev_server() {
         .assert()
         .success()
         .stdout(predicate::str::contains("naming_clarity: 4/5 (87% conf.)"))
-        .stdout(predicate::str::contains("Composite score: quality 4.6/5"));
+        .stdout(predicate::str::contains("Composite score: quality 4.6/5"))
+        // Rubric situations are shown only for metrics below the threshold.
+        .stdout(predicate::str::contains("↳").not());
 
     // 6. Test repeated scan hits cache
     let mut cache_cmd = Command::cargo_bin("qualitycheck").unwrap();
@@ -294,6 +300,17 @@ fn test_cli_scan_strict_mode_exit_code() {
         .arg(".")
         .assert()
         .success();
+
+    // gaps says in words what each failing answer means
+    let mut gaps_cmd = Command::cargo_bin("qualitycheck").unwrap();
+    gaps_cmd
+        .current_dir(tmp_repo.path())
+        .arg("gaps")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complexity_level: critical"))
+        .stdout(predicate::str::contains("↳ Control flow is tangled"))
+        .stdout(predicate::str::contains("↳ The file contains commented-out code blocks"));
 
     drop(server_handle);
 }

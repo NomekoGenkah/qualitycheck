@@ -116,6 +116,9 @@ pub fn print_scan_result(
                         };
 
                         println!("{}", colored_line);
+                        if counts_toward_score(metric) && metric.normalized_score < profile.fail_below {
+                            print_matched_rubric(metric, "      ", colors_enabled);
+                        }
                     }
                 }
 
@@ -224,6 +227,9 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                         line
                     };
                     println!("{}", colored_line);
+                    if counts_toward_score(metric) {
+                        print_matched_rubric(metric, "      ", colors_enabled);
+                    }
                 }
 
                 let comp_str = format!("Composite score: {:.1}/5", profile.composite_score);
@@ -651,6 +657,19 @@ fn format_distribution(metric: &MetricEvaluation) -> String {
         .map(|(option, p)| format!("{} {}%", option, (p * 100.0).round() as u64))
         .collect();
     format!(" [{}]", parts.join(" · "))
+}
+
+fn counts_toward_score(metric: &MetricEvaluation) -> bool {
+    !metric.excluded_low_confidence && !metric.not_applicable
+}
+
+/// What the answer means, in the profile's own words, under the metric's line.
+fn print_matched_rubric(metric: &MetricEvaluation, indent: &str, colors_enabled: bool) {
+    let Some(rubric) = &metric.matched_rubric else {
+        return;
+    };
+    let line = format!("{indent}↳ {rubric}");
+    println!("{}", if colors_enabled { colorize(&line, "90") } else { line });
 }
 
 fn excluded_suffix(metric: &MetricEvaluation, min_confidence: f64) -> String {

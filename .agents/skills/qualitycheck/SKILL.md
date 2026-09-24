@@ -145,6 +145,9 @@ qualitycheck scan src/ --profile quality,security --format json
 
 `normalized_score` is the probability-weighted score; `raw_value` is only Jev's top pick, and for
 enum metrics `probabilities` shows how close the alternatives were. Judge by `normalized_score`.
+`matched_rubric` is the profile's description of the situation Jev's answer corresponds to (the
+nearest level for scale metrics): it names the kind of problem, not its location, so read the file
+to find where it occurs.
 
 Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition doesn't hold for the
 file, e.g. input validation in a file that receives no external input) or

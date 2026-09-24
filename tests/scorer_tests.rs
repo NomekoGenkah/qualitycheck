@@ -501,3 +501,34 @@ fn test_binary_answer_scores_by_probability_of_the_good_outcome() {
     let swing = score_metric_answer(&dead_code, &answer(0.49)) - score_metric_answer(&dead_code, &answer(0.51));
     assert!(swing.abs() < 0.1);
 }
+
+#[test]
+fn test_evaluation_records_the_rubric_situation_of_the_answer() {
+    let profile = qualitycheck::profile::load_profile("quality").unwrap();
+    let mut results = HashMap::new();
+    // Scale answers are weighted positions between levels: 2.6 reads as level 3.
+    results.insert(
+        "naming_clarity".to_string(),
+        CachedMetricResult { value: RawMetricValue::Scale(2.6), confidence: 0.8, probabilities: None },
+    );
+    results.insert("complexity_level".to_string(), enum_answer("high", &[("high", 0.7), ("medium", 0.3)]));
+    results.insert(
+        "has_dead_code".to_string(),
+        CachedMetricResult { value: RawMetricValue::Binary(true), confidence: 0.9, probabilities: None },
+    );
+
+    let evaluation = evaluate_file_with_metrics(&[profile], &results);
+    let rubric = |id: &str| {
+        evaluation[0].metrics.iter().find(|m| m.metric_id == id).unwrap().matched_rubric.clone().unwrap()
+    };
+
+    assert!(rubric("naming_clarity").starts_with("Names are mostly understandable"));
+    assert!(rubric("complexity_level").starts_with("Several functions have deep nesting"));
+    assert!(rubric("has_dead_code").starts_with("The file contains commented-out code"));
+}
+
+#[test]
+fn test_metric_without_rubric_records_none() {
+    let metric = input_validation_metric();
+    assert_eq!(metric.rubric_for(&RawMetricValue::Enum("fair".to_string())), None);
+}

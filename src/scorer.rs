@@ -24,6 +24,10 @@ pub struct MetricEvaluation {
     pub probabilities: Option<BTreeMap<String, f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<[f64; 2]>,
+    /// The profile's rubric situation for `raw_value`, which says in words what the answer
+    /// means. Absent for metrics without a rubric and in runs saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rubric: Option<String>,
     /// Confidence fell below the profile's `min_confidence`, so this metric is reported but
     /// does not count toward the composite score.
     #[serde(default)]
@@ -239,6 +243,7 @@ pub fn evaluate_file_with_metrics(
                     normalized_score: normalized,
                     probabilities: cached.probabilities.clone(),
                     range: metric.range,
+                    matched_rubric: metric.rubric_for(&cached.value).map(str::to_string),
                     excluded_low_confidence,
                     not_applicable,
                 });

@@ -247,6 +247,16 @@ lands between them instead of jumping a whole option with whichever wins narrowl
 distribution under `probabilities`; `qualitycheck file` shows the likelier options, e.g.
 `input_validation: good (29% conf.) -> normalized: 3.1/5 [good 46% · fair 43%]`.
 
+Each answer also records `matched_rubric`: the rubric description of the chosen option, or of the
+nearest level for `scale` metrics. `scan`, `patch`, and `gaps` print it under each metric that
+counts toward the composite and scores below `fail_below`, and `file` under every metric that
+counts, so a low score says what kind of problem was found:
+
+```
+  [security] injection_risk: medium (41% conf.)
+      ↳ Some interpreted strings are assembled by concatenating or formatting external data with partial or inconsistent escaping.
+```
+
 Scoring policy (`weight`, `fail_below`, `min_confidence`, `good_value`, `score_map`) is not part of the
 cache key: changing it re-scores cached answers without new API calls. Changing a `question`,
 `rubric`, or `applies_when` re-queries.

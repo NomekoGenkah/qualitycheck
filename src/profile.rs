@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cache::RawMetricValue;
 use crate::config::get_profiles_dir;
 use crate::error::ProfileError;
 
@@ -160,6 +161,26 @@ impl Metric {
     /// Key under which the `applies_when` answer is requested from Jev and cached.
     pub fn applicability_id(&self) -> String {
         format!("{}:applies", self.id)
+    }
+
+    /// The rubric situation describing `value`: the nearest level for scale answers (which are
+    /// probability-weighted positions between levels), the chosen option for enums, and the
+    /// `"true"`/`"false"` case for binaries. `None` when the metric has no rubric.
+    pub fn rubric_for(&self, value: &RawMetricValue) -> Option<&str> {
+        match (self.rubric.as_ref()?, value) {
+            (Rubric::Levels(levels), RawMetricValue::Scale(v)) => {
+                let index = (v.round() as i64 - self.scale_min_level()).clamp(0, levels.len() as i64 - 1);
+                levels.get(index as usize).map(String::as_str)
+            }
+            (Rubric::Descriptions(map), RawMetricValue::Enum(choice)) => map
+                .iter()
+                .find(|(option, _)| option.eq_ignore_ascii_case(choice))
+                .map(|(_, description)| description.as_str()),
+            (Rubric::Descriptions(map), RawMetricValue::Binary(b)) => {
+                map.get(&b.to_string()).map(String::as_str)
+            }
+            _ => None,
+        }
     }
 }
 
