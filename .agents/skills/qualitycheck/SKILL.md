@@ -3,7 +3,8 @@ name: qualitycheck
 description: >-
   Evaluate and audit qualitative code quality (naming clarity, cyclomatic complexity, dead code, cohesion,
   security posture) using the qualitycheck CLI. Use when the user asks to review, audit, inspect
-  code quality, evaluate git diffs/PRs for regressions, or triage quality gaps.
+  code quality, evaluate git diffs/PRs for regressions, triage quality gaps, locate where a quality
+  problem is in a file, or gate pull requests on quality in CI.
 ---
 
 # qualitycheck Skill
@@ -17,6 +18,8 @@ Activate this skill when:
 - Evaluating changes before a commit or PR (`qualitycheck patch`).
 - Verifying whether a change or refactoring improved or degraded code quality (`qualitycheck patch --delta`, or `qualitycheck diff` between saved runs).
 - Triaging quality regressions or identifying failing metrics (`qualitycheck gaps`).
+- Finding where in a file a low score comes from (`--explain`).
+- Setting up a quality gate in CI (`--format github`; see `examples/github-workflow.yml` in the repository).
 
 ---
 
@@ -56,20 +59,19 @@ and `--fail-on-regression <POINTS>` exits 1 only for drops larger than POINTS or
 ```bash
 qualitycheck patch --base main --fail-on-regression 0.5 --fail-on-metric-regression 1.0 --format json
 ```
-Scores vary by up to ~0.2 (composite) and ~0.4 (single metric) between runs on unchanged code, so
-don't treat smaller moves as signal.
 If a file is marked down for work it delegates (validation done by a service it calls, logic
 tested in another file), re-run with `--context`: related files are sent alongside each file and
 listed under `context_files` in the output.
 
-In the JSON report, `regressions` lists what the change made worse (`kind`: `dropped` or
-`below_threshold_without_base`); `file_diffs` has composite and metric deltas per changed file
+In the JSON report, `regressions` lists composites the change made worse (`kind`: `dropped` or
+`below_threshold_without_base`), `metric_regressions` single metrics that dropped past
+`--fail-on-metric-regression`, and `file_diffs` composite and metric deltas per changed file
 (`old_composite` is `null` for files without a base version).
 
-Metric scores are probability-weighted, so an uncertain answer that flips its top option between
-near-identical versions moves the score only slightly. Composite changes of 0.1–0.2 on files the
-change barely touched are still normal model variation: use an allowance of about `0.5`, and look at
-the metric deltas in `file_diffs` before treating a small drop as real.
+Jev's answers vary slightly between requests even for identical code (re-runs are identical only
+because answers are cached): on trivial edits, composites moved by up to ~0.2 and single metrics by
+up to ~0.4. Don't treat smaller moves as signal; allowances of `0.5` (composite) and `1.0` (metric)
+leave margin. Look at the metric deltas in `file_diffs` before treating a small drop as real.
 
 `--context` costs roughly 2–3× the input tokens for files that get related files; check what would
 be attached with `--context --preview --full` first.
@@ -80,6 +82,8 @@ Always pass `--format json` so the output can be parsed directly without ANSI es
 qualitycheck scan <path> --format json
 ```
 All diagnostic logs and progress bars are emitted to `stderr`, leaving `stdout` clean for JSON parsing.
+`--format github` (Actions annotations plus a step summary) and `--format markdown` are for CI and
+pull request comments, not for parsing.
 
 ### 4. Compact Triage with `gaps`
 Avoid reading huge multi-file scan reports into context. Use `qualitycheck gaps` to only retrieve files and metrics that failed the threshold:
@@ -94,7 +98,9 @@ qualitycheck gaps --run <run-id> --format json
 To find where a low score comes from, re-run with `--explain` instead of reading the whole file:
 each failing metric gets `evidence.hotspots` (line ranges Jev judged responsible, with
 probabilities). An empty `hotspots` list means the finding concerns the file as a whole. It costs
-about one more scoring's worth of tokens per failing file, and is cached.
+about one more scoring's worth of tokens per failing file, and is cached. `gaps` and `file` show
+evidence only from runs made with `--explain`; re-scanning with it reuses the cached scores, so it
+costs only the explanation.
 ```bash
 qualitycheck scan src/auth.rs --explain --format json
 ```
@@ -123,9 +129,9 @@ changed file against its base version in one run. To compare arbitrary points in
 
 | Command | Purpose | Key Flags |
 |---|---|---|
-| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--explain`, `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore`, `--format <table\|json\|github\|markdown>` |
+| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--explain`, `--context`, `--all-files`, `--profile <name>`, `--preview`, `--strict`, `--no-ignore`, `--format <table\|json\|github\|markdown>` |
 | `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--fail-on-metric-regression <POINTS>`, `--explain`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json\|github\|markdown>` |
-| `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
+| `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json\|github\|markdown>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck diff <RUN-A> <RUN-B>` | Compare two historical runs for score deltas | `--format <table\|json>` |
 | `qualitycheck runs list` | List all historical runs stored in `.qualitycheck/runs/` | |
@@ -152,7 +158,7 @@ qualitycheck scan src/ --profile quality,security --format json
 ## Exit Codes
 
 - `0`: Scan succeeded and all files met thresholds (or running in informational mode without `--strict`).
-- `1`: Gate failure — with `--strict`, a file scored below its profile's `fail_below`; with `--fail-on-regression`, the change introduced a regression.
+- `1`: Gate failure — with `--strict`, a file scored below its profile's `fail_below`; with `--fail-on-regression` or `--fail-on-metric-regression`, the change introduced a regression.
 - `2`: Configuration or usage error (e.g. missing API key, invalid profile).
 
 `normalized_score` is the probability-weighted score; `raw_value` is only Jev's top pick, and for

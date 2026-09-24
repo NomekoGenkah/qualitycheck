@@ -12,15 +12,15 @@ Designed to be run by humans directly, in CI pipelines, or invoked by AI coding 
 
 ## Key Features
 
-- **Deterministic Aggregation**: Jev returns typed answers (`scale`, `enum`, `binary`) with calibrated probabilities. All aggregation (probability-weighted metric scores, weighted composites, threshold comparisons, confidence and applicability exclusions, regression gating) is calculated deterministically in Rust.
-- **Rubric-Described Metrics**: Every built-in metric describes each possible answer as a concrete situation, and can declare when it applies (`applies_when`), so a file isn't scored on concerns it doesn't own. Low-confidence answers are reported but kept out of the composite.
+- **Deterministic Aggregation**: Jev returns typed answers (`scale`, `enum`, `binary`) with calibrated probabilities. All aggregation (probability-weighted metric scores, weighted composites, threshold comparisons, confidence and applicability weighting, regression gating) is calculated deterministically in Rust.
+- **Rubric-Described Metrics**: Every built-in metric describes each possible answer as a concrete situation, and can declare when it applies (`applies_when`), so a file isn't scored on concerns it doesn't own. Uncertain or likely-inapplicable answers count only partly, phasing in gradually so a borderline answer can't swing a composite. Low scores are shown with the rubric description of the answer.
 - **Content-Addressed Caching**: Keyed by `blake3(file_content)` plus a hash of what is asked (questions, rubrics, conditions, and related files with `--context`). Re-scans cost zero API calls for unchanged files; changing a question re-queries, while changing weights or thresholds re-scores cached answers for free. `.qualitycheck/` ignores itself in git.
 - **Offline Token & Cost Estimation (`--preview`)**: Pre-calculate token usage and estimated cost before making any API calls. Fully offline, 0 network requests, and aware of cached files.
 - **Token & Cost Tracking**: Live runs report exact input/output tokens and cost ($0.042 / 1M input tokens), reporting $0.00 for cache hits.
-- **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or a base branch, and with `--delta` / `--fail-on-regression` scores the base version too, so only regressions introduced by the change fail the gate.
+- **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or a base branch, and with `--delta` / `--fail-on-regression` / `--fail-on-metric-regression` scores the base version too, so only regressions introduced by the change fail the gate.
 - **Finding Locations (`--explain`)**: Asks Jev which regions of a file are responsible for each failing metric and reports them as line ranges.
 - **Cross-File Context (`--context`)**: Sends related files (tests, referenced and referencing files) alongside each file, so delegated work isn't scored as missing.
-- **CI-Ready**: `--format github` annotates findings on the changed lines and writes a step summary; `--format markdown` renders the summary for pull request comments. See [`examples/github-workflow.yml`](examples/github-workflow.yml).
+- **CI-Ready**: `--format github` annotates findings on the changed files, at the lines `--explain` located, and writes a step summary; `--format markdown` renders the summary for pull request comments. See [`examples/github-workflow.yml`](examples/github-workflow.yml).
 - **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
 - **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
 
@@ -251,7 +251,7 @@ qualitycheck describe
 | Code | Meaning |
 |---|---|
 | `0` | Success — informational scan, or all requested gates passed |
-| `1` | Gate failure — `--strict` and a score below `fail_below`, or `--fail-on-regression` and a regression |
+| `1` | Gate failure — `--strict` and a score below `fail_below`, or `--fail-on-regression` / `--fail-on-metric-regression` and a regression |
 | `2` | Error — usage error, configuration/API key missing, or malformed profile |
 
 ---
@@ -359,7 +359,7 @@ qualitycheck/
 │   ├── cache.rs       # Blake3 content-addressed cache (.qualitycheck/cache/)
 │   ├── jev_client.rs  # Async batch client for TypeSafe AI Jev API
 │   ├── pipeline.rs    # Concurrent scan orchestration & offline preview estimation
-│   ├── scorer.rs      # Normalization, weighted composites, exclusions, regression detection
+│   ├── scorer.rs      # Normalization, inclusion-weighted composites, regression detection
 │   ├── storage.rs     # Run persistence and run listing (.qualitycheck/runs/)
 │   ├── output.rs      # Table/JSON display, report persistence, triage & diffing
 │   ├── ci_report.rs   # GitHub Actions annotations and Markdown summary

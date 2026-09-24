@@ -58,7 +58,7 @@ qualitycheck gaps --format json
 ---
 
 ## 3. Conventions & Rules
-- **Pure stdout for JSON**: Machine-readable output (`--format json`) must print clean JSON to stdout. Diagnostic messages and progress go to stderr.
+- **Pure stdout for JSON**: Machine-readable output (`--format json`) must print clean JSON to stdout, and `--format github` only workflow commands. Diagnostic messages and progress go to stderr.
 - **Deterministic Aggregation**: Never allow external LLM responses to determine composite pass/fail decisions. All rubric conversions and composite weighted averages must occur in Rust deterministically.
 - **Offline Safety**: `--preview` must remain fully offline (no API key required, 0 network requests).
 - **Built-in Profile Changes**: `init` copies `profiles/*.json` into the user's config dir, where copies take precedence. When changing a built-in, add the old version's hash to `SUPERSEDED_BUILTIN_HASHES` (`src/profile.rs`) so unedited copies keep upgrading; `tests/profile_tests.rs` pins the current hashes and fails until you do.
