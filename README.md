@@ -122,7 +122,16 @@ qualitycheck patch --base main --delta
 # Gate on regressions only: exit 1 if a changed file's composite drops by more than 0.5, or a
 # new file scores below its profile's fail_below. Files that were already low at the base pass.
 qualitycheck patch --base main --fail-on-regression 0.5
+
+# Also fail when a single metric drops by more than 1.0, even if the composite averages it away
+qualitycheck patch --base main --fail-on-regression 0.5 --fail-on-metric-regression 1.0
 ```
+
+A metric's drop is scaled by how much it counts in both versions (its `inclusion`, below), so a
+metric that barely applies can't fail the gate on its own. Jev's answers vary slightly between
+runs, even on identical content (the cache is what makes re-runs identical): on trivial edits,
+composites moved by up to 0.2 and single metrics by up to 0.4, so keep allowances above those —
+0.5 for composites and 1.0 for metrics — and keep `.qualitycheck/cache` between CI runs.
 
 With `--delta`, base versions go through the same content-addressed cache, so re-running after
 further edits only re-scores what changed. `--preview` includes the base versions in its estimate.
@@ -231,12 +240,19 @@ where you can edit them; unedited copies are refreshed when a new release improv
 - `rubric` (optional) describes each possible answer as a concrete situation: one entry per level
   for `scale` (lowest first), one per option for `enum`, and `"true"`/`"false"` for `binary`. Jev
   answers far more decisively against described situations than against bare labels.
-- `applies_when` (optional) is asked as a separate yes/no question over the same file. When it
-  doesn't hold, the metric is reported `not_applicable` and left out of the composite, so a
-  controller that delegates validation isn't scored on validation it doesn't own.
-- `min_confidence` (optional, default `0.2`) excludes metrics Jev answered with near-flat probability
-  from the composite score: they are still reported, flagged `excluded_low_confidence`. If every
-  metric of a profile is excluded, the profile is reported `inconclusive` and does not fail `--strict`.
+- `applies_when` (optional) is asked as a separate yes/no question over the same file, so a
+  controller that delegates validation isn't scored on validation it doesn't own. The metric counts
+  in the composite in proportion to how likely it applies: not at all below a probability of 0.25,
+  fully above 0.75, and linearly more in between. Below 0.5 it is also flagged `not_applicable`.
+- `min_confidence` (optional, default `0.2`) keeps answers Jev gave with near-flat probability out
+  of the composite: they count not at all below half of it, fully from it up, and linearly more in
+  between, and are flagged `excluded_low_confidence` below it. If every metric of a profile is
+  flagged, the profile is reported `inconclusive` and does not fail `--strict`.
+
+  Each metric reports its P(applies) as `applicability` and the share of its weight it carried as
+  `inclusion`, and output notes the reason when it counts less than 90%, e.g.
+  `input_validation: fair (60% conf.) [counts 38%: applies 44%]`. The gradual ramps keep an answer
+  that hovers around a threshold from jumping in and out of the composite between runs.
 - `scale` ranges may span 2 to 10 levels (Jev's limit).
 
 Each answer is scored on 1–5 as the probability-weighted mean over every possible answer: Jev's

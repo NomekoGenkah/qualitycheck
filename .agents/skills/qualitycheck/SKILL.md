@@ -50,10 +50,14 @@ qualitycheck patch --base main --format json
 
 To tell whether a low score was introduced by the change or predates it, don't scan the base
 revision by hand: `--delta` scores each changed file at the base as well and reports score changes,
-and `--fail-on-regression <POINTS>` exits 1 only for drops larger than POINTS or poor new files:
+and `--fail-on-regression <POINTS>` exits 1 only for drops larger than POINTS or poor new files;
+`--fail-on-metric-regression <POINTS>` also fails on a single metric dropping by more than POINTS
+(reported under `metric_regressions`), which a composite can average away:
 ```bash
-qualitycheck patch --base main --fail-on-regression 0.5 --format json
+qualitycheck patch --base main --fail-on-regression 0.5 --fail-on-metric-regression 1.0 --format json
 ```
+Scores vary by up to ~0.2 (composite) and ~0.4 (single metric) between runs on unchanged code, so
+don't treat smaller moves as signal.
 If a file is marked down for work it delegates (validation done by a service it calls, logic
 tested in another file), re-run with `--context`: related files are sent alongside each file and
 listed under `context_files` in the output.
@@ -149,8 +153,9 @@ enum metrics `probabilities` shows how close the alternatives were. Judge by `no
 nearest level for scale metrics): it names the kind of problem, not its location, so read the file
 to find where it occurs.
 
-Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition doesn't hold for the
-file, e.g. input validation in a file that receives no external input) or
-`"excluded_low_confidence": true` (answered below the profile's `min_confidence`) do not count toward
-`composite_score`; don't treat them as findings. A profile with `"inconclusive": true` had every
-metric excluded and was not judged.
+Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition likely doesn't hold
+for the file, e.g. input validation in a file that receives no external input) or
+`"excluded_low_confidence": true` (answered below the profile's `min_confidence`) count little or
+nothing toward `composite_score`; don't treat them as findings. `inclusion` (0–1) is the share of its
+weight each metric carried. A profile with `"inconclusive": true` had every metric flagged and was
+not judged.

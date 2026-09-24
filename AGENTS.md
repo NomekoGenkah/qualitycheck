@@ -47,7 +47,7 @@ cargo build --release
 qualitycheck patch --preview
 
 # Evaluate current changes before committing: fail only on regressions this change introduces
-qualitycheck patch --fail-on-regression 0.5 --format json
+qualitycheck patch --fail-on-regression 0.5 --fail-on-metric-regression 1.0 --format json
 
 # Filter failing metrics only
 qualitycheck gaps --format json

@@ -27,7 +27,7 @@ use qualitycheck::pipeline::{
     run_preview_pipeline_on_inputs, run_scan_pipeline_on_inputs, ScanInput,
 };
 use qualitycheck::profile::{list_available_profiles, load_profile, load_profiles_by_names};
-use qualitycheck::scorer::{find_regressions, run_scan_pipeline, RunUsage};
+use qualitycheck::scorer::{find_metric_regressions, find_regressions, run_scan_pipeline, RunUsage};
 use qualitycheck::walker::{
     collect_files_from_targets, filter_candidate_files, is_content_eligible, WalkerOptions,
 };
@@ -252,7 +252,13 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
             "--fail-on-regression must be zero or positive".to_string(),
         ));
     }
-    let compare_base = args.delta || args.fail_on_regression.is_some();
+    if args.fail_on_metric_regression.is_some_and(|max_drop| max_drop < 0.0) {
+        return Err(QualityCheckError::Usage(
+            "--fail-on-metric-regression must be zero or positive".to_string(),
+        ));
+    }
+    let compare_base =
+        args.delta || args.fail_on_regression.is_some() || args.fail_on_metric_regression.is_some();
 
     let target_path = args.path.clone();
     let project_root = find_repo_root(&target_path)
@@ -407,14 +413,20 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         .fail_on_regression
         .map(|max_drop| find_regressions(&base_result, &head_result, max_drop))
         .unwrap_or_default();
-    let failed = strict_failed || !regressions.is_empty();
+    let metric_regressions = args
+        .fail_on_metric_regression
+        .map(|max_drop| find_metric_regressions(&base_result, &head_result, max_drop))
+        .unwrap_or_default();
+    let failed = strict_failed || !regressions.is_empty() || !metric_regressions.is_empty();
 
     let report = PatchDeltaReport {
         base: changes.base,
         head_run_id: head_result.run_id.clone(),
         max_regression: args.fail_on_regression,
+        max_metric_regression: args.fail_on_metric_regression,
         passed: !failed,
         regressions,
+        metric_regressions,
         file_diffs: diff_runs(&base_result, &head_result).file_diffs,
         usage: combine_usage(&base_result.usage, &head_result.usage),
     };

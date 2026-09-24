@@ -161,6 +161,12 @@ pub struct PatchArgs {
     #[arg(long, value_name = "POINTS")]
     pub fail_on_regression: Option<f64>,
 
+    /// Exit code 1 if any single metric of a changed file drops by more than POINTS versus the
+    /// base, scaled by how much the metric counts in both versions. Catches one metric getting
+    /// much worse while the composite averages it away. Implies --delta
+    #[arg(long, value_name = "POINTS")]
+    pub fail_on_metric_regression: Option<f64>,
+
     /// Additional inclusion glob pattern
     #[arg(long = "include")]
     pub include: Vec<String>,

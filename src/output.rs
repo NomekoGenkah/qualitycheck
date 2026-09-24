@@ -8,7 +8,8 @@ use crate::cache::RawMetricValue;
 use crate::pipeline::ScanPreviewResult;
 use crate::profile::MetricType;
 use crate::scorer::{
-    round_to_tenth, FileEvaluation, MetricEvaluation, Regression, RegressionKind, RunUsage,
+    applicability_share, round_to_tenth, FileEvaluation, MetricEvaluation, MetricRegression, Regression,
+    RegressionKind, RunUsage,
     ScanRunResult,
 };
 
@@ -53,8 +54,13 @@ pub struct PatchDeltaReport {
     pub head_run_id: String,
     /// `--fail-on-regression` allowance, when gating was requested.
     pub max_regression: Option<f64>,
+    /// `--fail-on-metric-regression` allowance, when gating was requested.
+    #[serde(default)]
+    pub max_metric_regression: Option<f64>,
     pub passed: bool,
     pub regressions: Vec<Regression>,
+    #[serde(default)]
+    pub metric_regressions: Vec<MetricRegression>,
     pub file_diffs: Vec<FileDiff>,
     /// Tokens for both sides combined.
     pub usage: RunUsage,
@@ -621,6 +627,27 @@ pub fn print_patch_delta_report(
                 }
             }
 
+            if let Some(max_drop) = report.max_metric_regression {
+                if report.metric_regressions.is_empty() {
+                    let line = format!("No metric regressions (allowed drop: {:.1}).", max_drop);
+                    println!("{}", if colors_enabled { colorize(&line, "32") } else { line });
+                } else {
+                    let header = format!("Metric regressions (allowed drop: {:.1}):", max_drop);
+                    println!("{}", if colors_enabled { colorize(&header, "31;1") } else { header });
+                    for regression in &report.metric_regressions {
+                        println!(
+                            "  {} [{}] {}: {:.1} -> {:.1} (weighted drop {:.1})",
+                            regression.relative_path,
+                            regression.profile_name,
+                            regression.metric_id,
+                            regression.old_score,
+                            regression.new_score,
+                            regression.weighted_drop
+                        );
+                    }
+                }
+            }
+
             let token_line = format!(
                 "Tokens consumed (base + working tree): {} input · {} output · Est. cost: ${:.5}",
                 report.usage.input_tokens, report.usage.output_tokens, report.usage.estimated_cost_usd
@@ -672,7 +699,26 @@ fn print_matched_rubric(metric: &MetricEvaluation, indent: &str, colors_enabled:
     println!("{}", if colors_enabled { colorize(&line, "90") } else { line });
 }
 
+/// Why a metric carries less than its full weight, e.g. ` [counts 38%: applies 44%]` or
+/// ` [excluded: applies 4%]`. Empty when it counts (nearly) fully.
 fn excluded_suffix(metric: &MetricEvaluation, min_confidence: f64) -> String {
+    let pct = |share: f64| (share * 100.0).round() as u64;
+    if let Some(inclusion) = metric.inclusion {
+        if inclusion >= 0.9 {
+            return String::new();
+        }
+        let mut reasons = Vec::new();
+        if let Some(applicability) = metric.applicability.filter(|p| applicability_share(*p) < 1.0) {
+            reasons.push(format!("applies {}%", pct(applicability)));
+        }
+        if metric.excluded_low_confidence {
+            reasons.push(format!("below {}% min conf.", pct(min_confidence)));
+        }
+        let share = if inclusion > 0.0 { format!("counts {}%", pct(inclusion)) } else { "excluded".to_string() };
+        return format!(" [{}: {}]", share, reasons.join(" · "));
+    }
+
+    // Runs scored before inclusion was recorded counted flagged metrics not at all.
     if metric.not_applicable {
         " [excluded: not applicable to this file]".to_string()
     } else if metric.excluded_low_confidence {

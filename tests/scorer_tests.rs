@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use qualitycheck::cache::{CachedMetricResult, RawMetricValue};
 use qualitycheck::profile::{Metric, MetricType, Profile};
 use qualitycheck::scorer::{
-    evaluate_file_with_metrics, find_regressions, normalize_metric_score, score_metric_answer,
+    applicability_share, confidence_share, evaluate_file_with_metrics, find_metric_regressions, find_regressions, normalize_metric_score, score_metric_answer,
     FileEvaluation,
     ProfileEvaluation, RegressionKind, RunUsage, ScanRunResult, SCORING_VERSION,
 };
@@ -531,4 +531,114 @@ fn test_evaluation_records_the_rubric_situation_of_the_answer() {
 fn test_metric_without_rubric_records_none() {
     let metric = input_validation_metric();
     assert_eq!(metric.rubric_for(&RawMetricValue::Enum("fair".to_string())), None);
+}
+
+fn applies_answer(p_true: f64) -> CachedMetricResult {
+    CachedMetricResult {
+        value: RawMetricValue::Binary(p_true >= 0.5),
+        confidence: (2.0 * p_true - 1.0).abs(),
+        probabilities: Some(qualitycheck::cache::binary_probabilities(p_true)),
+    }
+}
+
+#[test]
+fn test_borderline_applicability_does_not_swing_the_composite() {
+    // naming 4/5 always counts; cohesion 1/5 counts only if it applies. Counted fully or not at
+    // all at 0.5, Jev's drift from 0.47 to 0.53 on the same file moved the composite 4.0 -> 2.5.
+    let mut profile = gating_profile(None);
+    profile.metrics[1].applies_when = Some("The file contains its own logic.".to_string());
+    let composite_at = |p_applies: f64| {
+        let mut results = answers((4.0, 0.9), (1.0, 0.9));
+        results.insert("cohesion:applies".to_string(), applies_answer(p_applies));
+        let evals = evaluate_file_with_metrics(std::slice::from_ref(&profile), &results);
+        (evals[0].composite_score, evals[0].metrics[1].clone())
+    };
+
+    let (below, cohesion_below) = composite_at(0.47);
+    let (above, cohesion_above) = composite_at(0.53);
+    assert!(cohesion_below.not_applicable && !cohesion_above.not_applicable);
+    assert!((below - above).abs() <= 0.2 + 1e-9, "swing was {below} -> {above}");
+    assert!(below > 2.5 && above < 4.0);
+    assert_eq!(cohesion_above.applicability, Some(0.53));
+
+    // Clearly inapplicable or applicable metrics count exactly as before.
+    assert_eq!(composite_at(0.1).0, 4.0);
+    assert_eq!(composite_at(0.9).0, 2.5);
+}
+
+#[test]
+fn test_borderline_confidence_does_not_swing_the_composite() {
+    let composite_at = |confidence: f64| {
+        evaluate_file_with_metrics(&[gating_profile(None)], &answers((4.0, 0.9), (1.0, confidence)))[0]
+            .composite_score
+    };
+    assert!((composite_at(0.19) - composite_at(0.21)).abs() <= 0.2 + 1e-9);
+    assert_eq!(composite_at(0.05), 4.0);
+    assert_eq!(composite_at(0.5), 2.5);
+}
+
+#[test]
+fn test_inclusion_shares_ramp_across_the_uncertain_band() {
+    assert_eq!(applicability_share(0.25), 0.0);
+    assert_eq!(applicability_share(0.5), 0.5);
+    assert_eq!(applicability_share(0.75), 1.0);
+    assert_eq!(confidence_share(0.1, 0.2), 0.0);
+    assert!((confidence_share(0.15, 0.2) - 0.5).abs() < 1e-9);
+    assert_eq!(confidence_share(0.2, 0.2), 1.0);
+    assert_eq!(confidence_share(0.0, 0.0), 1.0);
+}
+
+#[test]
+fn test_applicability_cached_without_probabilities_counts_as_certain() {
+    let mut profile = gating_profile(None);
+    profile.metrics[1].applies_when = Some("The file contains its own logic.".to_string());
+    let mut results = answers((4.0, 0.9), (1.0, 0.9));
+    results.insert(
+        "cohesion:applies".to_string(),
+        CachedMetricResult { value: RawMetricValue::Binary(true), confidence: 0.8, probabilities: None },
+    );
+    let evals = evaluate_file_with_metrics(&[profile], &results);
+    assert_eq!(evals[0].metrics[1].inclusion, Some(1.0));
+    assert_eq!(evals[0].composite_score, 2.5);
+}
+
+/// (path, naming answer, cohesion answer), each answer being (level, confidence).
+type ScoredFile<'a> = (&'a str, (f64, f64), (f64, f64));
+
+/// A run of `gating_profile` files, each scored from its naming and cohesion answers.
+fn run_scored(files: &[ScoredFile]) -> ScanRunResult {
+    let mut run = run_of(&files.iter().map(|(path, _, _)| (*path, 0.0, false)).collect::<Vec<_>>());
+    for (file, (_, naming, cohesion)) in run.files.iter_mut().zip(files) {
+        file.profiles = evaluate_file_with_metrics(&[gating_profile(None)], &answers(*naming, *cohesion));
+    }
+    run
+}
+
+#[test]
+fn test_find_metric_regressions_weighs_drops_by_how_much_the_metric_counts() {
+    let base = run_scored(&[
+        ("dropped.rs", (4.0, 0.9), (5.0, 0.9)),
+        ("barely_counted.rs", (4.0, 0.9), (5.0, 0.9)),
+        ("small_drop.rs", (4.0, 0.9), (5.0, 0.9)),
+    ]);
+    let head = run_scored(&[
+        ("dropped.rs", (4.0, 0.9), (2.0, 0.9)),
+        // Same 3-point drop, answered at 12% confidence: counts 20%, weighted drop 0.6.
+        ("barely_counted.rs", (4.0, 0.9), (2.0, 0.12)),
+        ("small_drop.rs", (4.0, 0.9), (4.2, 0.9)),
+        ("new.rs", (1.0, 0.9), (1.0, 0.9)),
+    ]);
+
+    let regressions = find_metric_regressions(&base, &head, 1.0);
+    assert_eq!(regressions.len(), 1, "{regressions:?}");
+    let r = &regressions[0];
+    assert_eq!((r.relative_path.as_str(), r.metric_id.as_str()), ("dropped.rs", "cohesion"));
+    assert_eq!((r.old_score, r.new_score, r.weighted_drop), (5.0, 2.0, 3.0));
+
+    // A zero allowance flags any counted drop, including one that barely counts.
+    let strict: Vec<String> = find_metric_regressions(&base, &head, 0.0)
+        .into_iter()
+        .map(|r| r.relative_path)
+        .collect();
+    assert!(strict.iter().any(|p| p == "barely_counted.rs") && strict.iter().any(|p| p == "small_drop.rs"));
 }

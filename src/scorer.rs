@@ -28,12 +28,21 @@ pub struct MetricEvaluation {
     /// means. Absent for metrics without a rubric and in runs saved before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_rubric: Option<String>,
-    /// Confidence fell below the profile's `min_confidence`, so this metric is reported but
-    /// does not count toward the composite score.
+    /// Jev's probability that the metric's `applies_when` condition holds for this file.
+    /// Absent for metrics without a condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<f64>,
+    /// Share of `weight` this metric carries in the composite, on [0, 1]: the product of its
+    /// applicability share and confidence share (see `applicability_share`, `confidence_share`).
+    /// Absent in runs scored before scoring version 4, where metrics counted fully or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusion: Option<f64>,
+    /// Confidence fell below the profile's `min_confidence`, so the metric counts only partly,
+    /// or not at all, and is not reported as a gap.
     #[serde(default)]
     pub excluded_low_confidence: bool,
-    /// The metric's `applies_when` condition was judged false for this file, so it is reported
-    /// but does not count toward the composite score.
+    /// The metric's `applies_when` condition is more likely false than true for this file, so
+    /// the metric counts only partly, or not at all, and is not reported as a gap.
     #[serde(default)]
     pub not_applicable: bool,
 }
@@ -46,8 +55,9 @@ pub struct ProfileEvaluation {
     #[serde(default)]
     pub min_confidence: f64,
     pub passed: bool,
-    /// Every metric was excluded (low confidence or not applicable): `composite_score` is then
-    /// computed over all metrics for reference only, and the profile passes without being judged.
+    /// Every metric was flagged low-confidence or not applicable: `composite_score` is then
+    /// computed over all metrics at full weight for reference only, and the profile passes
+    /// without being judged.
     #[serde(default)]
     pub inconclusive: bool,
     pub metrics: Vec<MetricEvaluation>,
@@ -77,8 +87,10 @@ pub struct FileEvaluation {
 /// Bumped whenever the same raw answers would produce different composite scores, so runs
 /// scored under different rules aren't silently compared. Version 0 (legacy, field absent)
 /// under-scored every scale metric by one level; version 1 counted every metric regardless of
-/// confidence; version 2 scored enum and binary answers by their top pick alone.
-pub const SCORING_VERSION: u32 = 3;
+/// confidence; version 2 scored enum and binary answers by their top pick alone; version 3
+/// counted a metric fully or not at all depending on whether its applicability and confidence
+/// cleared a cutoff.
+pub const SCORING_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanRunResult {
@@ -214,24 +226,26 @@ pub fn evaluate_file_with_metrics(
 
     for profile in profiles {
         let min_confidence = profile.effective_min_confidence();
-        let mut confident = WeightedSum::default();
+        let mut included = WeightedSum::default();
         let mut everything = WeightedSum::default();
+        let mut all_flagged = true;
         let mut metric_evals = Vec::with_capacity(profile.metrics.len());
 
         for metric in &profile.metrics {
             if let Some(cached) = metric_results.get(&metric.id) {
                 let normalized = score_metric_answer(metric, cached);
                 let weight = if metric.weight > 0.0 { metric.weight } else { 1.0 };
+                let applicability = metric_results
+                    .get(&metric.applicability_id())
+                    .map(probability_of_true);
+                let inclusion = applicability.map_or(1.0, applicability_share)
+                    * confidence_share(cached.confidence, min_confidence);
                 let excluded_low_confidence = cached.confidence < min_confidence;
-                let not_applicable = matches!(
-                    metric_results.get(&metric.applicability_id()).map(|a| &a.value),
-                    Some(RawMetricValue::Binary(false))
-                );
+                let not_applicable = applicability.is_some_and(|p| p < 0.5);
+                all_flagged &= excluded_low_confidence || not_applicable;
 
                 everything.add(normalized, weight);
-                if !excluded_low_confidence && !not_applicable {
-                    confident.add(normalized, weight);
-                }
+                included.add(normalized, weight * inclusion);
 
                 metric_evals.push(MetricEvaluation {
                     metric_id: metric.id.clone(),
@@ -244,17 +258,19 @@ pub fn evaluate_file_with_metrics(
                     probabilities: cached.probabilities.clone(),
                     range: metric.range,
                     matched_rubric: metric.rubric_for(&cached.value).map(str::to_string),
+                    applicability,
+                    inclusion: Some(inclusion),
                     excluded_low_confidence,
                     not_applicable,
                 });
             }
         }
 
-        let inconclusive = confident.weight == 0.0 && everything.weight > 0.0;
+        let inconclusive = all_flagged && everything.weight > 0.0;
         let composite_score = if inconclusive {
             everything.mean()
         } else {
-            confident.mean()
+            included.mean()
         };
         let passed = inconclusive || composite_score >= profile.fail_below;
 
@@ -270,6 +286,39 @@ pub fn evaluate_file_with_metrics(
     }
 
     profile_evals
+}
+
+/// Probability that a yes/no answer is yes; answers cached without probabilities count as certain.
+fn probability_of_true(answer: &CachedMetricResult) -> f64 {
+    match (&answer.probabilities, &answer.value) {
+        (Some(probabilities), _) if probabilities.contains_key("true") => {
+            probabilities["true"].clamp(0.0, 1.0)
+        }
+        (_, RawMetricValue::Binary(true)) => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Share of its weight a metric carries given the probability that it applies: none below 0.25,
+/// all above 0.75, and linearly more in between. Jev's answer for a borderline file drifts across
+/// 0.5 between runs; counting a metric fully or not at all at 0.5 swung composites by more than
+/// the regression allowance on identical code, while clearly (in)applicable metrics are unaffected.
+pub fn applicability_share(p_applies: f64) -> f64 {
+    ramp(p_applies, 0.25, 0.75)
+}
+
+/// Share of its weight a metric carries given its confidence: none below half the profile's
+/// `min_confidence`, all from `min_confidence` up, and linearly more in between, so an answer
+/// hovering around the threshold doesn't jump in and out of the composite.
+pub fn confidence_share(confidence: f64, min_confidence: f64) -> f64 {
+    if min_confidence <= 0.0 {
+        return 1.0;
+    }
+    ramp(confidence, min_confidence / 2.0, min_confidence)
+}
+
+fn ramp(x: f64, low: f64, high: f64) -> f64 {
+    ((x - low) / (high - low)).clamp(0.0, 1.0)
 }
 
 #[derive(Default)]
@@ -347,6 +396,59 @@ pub fn find_regressions(base: &ScanRunResult, head: &ScanRunResult, max_drop: f6
         }
     }
     regressions
+}
+
+/// A metric of a changed file whose score dropped by more than the allowed amount versus the
+/// base, even if the composite averaged the drop away.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricRegression {
+    pub relative_path: String,
+    pub profile_name: String,
+    pub metric_id: String,
+    pub old_score: f64,
+    pub new_score: f64,
+    /// `old_score - new_score` scaled by the smaller of the metric's `inclusion` in the two
+    /// versions: a metric that barely counts in either version can't fail the gate on its own.
+    pub weighted_drop: f64,
+}
+
+/// Metrics whose weighted drop from the base exceeds `max_drop`. Files without a base version
+/// have nothing to compare; `find_regressions` covers them.
+pub fn find_metric_regressions(base: &ScanRunResult, head: &ScanRunResult, max_drop: f64) -> Vec<MetricRegression> {
+    let mut regressions = Vec::new();
+    for file in &head.files {
+        let Some(base_file) = base.files.iter().find(|f| f.relative_path == file.relative_path) else {
+            continue;
+        };
+        for profile in &file.profiles {
+            let Some(base_profile) = base_file.profiles.iter().find(|p| p.profile_name == profile.profile_name) else {
+                continue;
+            };
+            for metric in &profile.metrics {
+                let Some(base_metric) = base_profile.metrics.iter().find(|m| m.metric_id == metric.metric_id) else {
+                    continue;
+                };
+                let counted = effective_inclusion(base_metric).min(effective_inclusion(metric));
+                let weighted_drop = round_to_tenth((base_metric.normalized_score - metric.normalized_score) * counted);
+                if weighted_drop > max_drop {
+                    regressions.push(MetricRegression {
+                        relative_path: file.relative_path.clone(),
+                        profile_name: profile.profile_name.clone(),
+                        metric_id: metric.metric_id.clone(),
+                        old_score: round_to_tenth(base_metric.normalized_score),
+                        new_score: round_to_tenth(metric.normalized_score),
+                        weighted_drop,
+                    });
+                }
+            }
+        }
+    }
+    regressions
+}
+
+/// `inclusion`, or for runs scored before it was recorded, whether the metric counted at all.
+fn effective_inclusion(metric: &MetricEvaluation) -> f64 {
+    metric.inclusion.unwrap_or(if metric.excluded_low_confidence || metric.not_applicable { 0.0 } else { 1.0 })
 }
 
 /// Composites are reported to one decimal; compare differences at that precision too.

@@ -830,7 +830,7 @@ fn test_cli_scan_excludes_not_applicable_metrics() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "naming_clarity: 1/5 (90% conf.) [excluded: not applicable to this file]",
+            "naming_clarity: 1/5 (90% conf.) [excluded: applies 4%]",
         ))
         .stdout(predicate::str::contains("Composite score: quality 5.0/5"));
 }
@@ -999,6 +999,54 @@ fn test_cli_patch_fail_on_regression_flags_drops_and_poor_new_files() {
 
     // The working-tree run is still saved for `gaps` and `file`.
     assert!(root.join(".qualitycheck/runs/latest.json").exists());
+}
+
+/// Good answers on every quality metric, except cohesion drops two levels in files marked
+/// "WORSE_COHESION": 5.0 -> 4.5 on the composite, 5 -> 3 on cohesion.
+fn cohesion_by_marker(body: &serde_json::Value) -> serde_json::Value {
+    let cohesion = if body["state"].to_string().contains("WORSE_COHESION") { 2.0 } else { 4.0 };
+    serde_json::json!({ "answers": {
+        "naming_clarity": { "score": 4.0, "confidence": 0.9 },
+        "naming_clarity:applies": { "noul": 0.97 },
+        "has_dead_code": { "noul": 0.02 },
+        "complexity_level": { "choice": "low", "confidence": 0.95 },
+        "cohesion": { "score": cohesion, "confidence": 0.9 },
+        "cohesion:applies": { "noul": 0.97 }
+    }})
+}
+
+#[test]
+fn test_cli_patch_fail_on_metric_regression_catches_what_the_composite_averages_away() {
+    let url = spawn_content_aware_mock_jev(cohesion_by_marker);
+    let (tmp, _repo) = repo_with_quality_history();
+    let root = tmp.path();
+    let config = tempdir().unwrap();
+    fs::write(root.join("controller.rs"), "// WORSE_COHESION\npub fn handle() {}\n").unwrap();
+
+    patch_cmd(root, config.path(), &url, &["--base", "HEAD", "--fail-on-regression", "0.5", "--no-color"])
+        .success()
+        .stdout(predicate::str::contains("[quality] composite: 5.0 -> 4.5 (-0.5)"));
+
+    let assert = patch_cmd(
+        root,
+        config.path(),
+        &url,
+        &["--base", "HEAD", "--fail-on-regression", "0.5", "--fail-on-metric-regression", "1.0", "--format", "json"],
+    )
+    .code(1);
+    let report: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(report["regressions"], serde_json::json!([]));
+    assert_eq!(report["max_metric_regression"], 1.0);
+    let regressions = report["metric_regressions"].as_array().unwrap();
+    assert_eq!(regressions.len(), 1);
+    assert_eq!(regressions[0]["relative_path"], "controller.rs");
+    assert_eq!(regressions[0]["metric_id"], "cohesion");
+    assert_eq!(regressions[0]["weighted_drop"], 2.0);
+
+    patch_cmd(root, config.path(), &url, &["--base", "HEAD", "--fail-on-metric-regression", "1.0", "--no-color"])
+        .code(1)
+        .stdout(predicate::str::contains("Metric regressions (allowed drop: 1.0):"))
+        .stdout(predicate::str::contains("controller.rs [quality] cohesion: 5.0 -> 3.0 (weighted drop 2.0)"));
 }
 
 #[test]
