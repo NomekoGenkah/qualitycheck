@@ -119,6 +119,12 @@ pub struct ScanArgs {
     /// extension, vendored directories, and minified or generated files are skipped
     #[arg(long)]
     pub all_files: bool,
+
+    /// For each metric scoring below its profile's fail_below, ask Jev which regions of the file
+    /// are responsible and report them as line ranges. One extra request per such file, costing
+    /// about as many input tokens as scoring it; answers are cached
+    #[arg(long)]
+    pub explain: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -205,6 +211,12 @@ pub struct PatchArgs {
     /// extension, vendored directories, and minified or generated files are skipped
     #[arg(long)]
     pub all_files: bool,
+
+    /// For each metric scoring below its profile's fail_below, ask Jev which regions of the file
+    /// are responsible and report them as line ranges. One extra request per such file, costing
+    /// about as many input tokens as scoring it; answers are cached
+    #[arg(long)]
+    pub explain: bool,
 }
 
 #[derive(Args, Debug, Clone)]

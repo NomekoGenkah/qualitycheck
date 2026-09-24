@@ -71,7 +71,57 @@ impl JevClient {
             state,
             questions: build_questions(metrics, state.is_object()),
         };
+        let response_json = self.send(&request_body).await?;
+        let usage = response_usage(&response_json);
 
+        let mut results = HashMap::new();
+        for metric in metrics {
+            let answer_val = extract_metric_answer(&response_json, &metric.id)
+                .ok_or_else(|| JevError::MissingMetricAnswer(metric.id.clone()))?;
+
+            let metric_res = parse_answer(answer_val, metric)?;
+            results.insert(metric.id.clone(), metric_res);
+
+            if metric.applies_when.is_some() {
+                let applicability_id = metric.applicability_id();
+                let answer_val = extract_metric_answer(&response_json, &applicability_id)
+                    .ok_or_else(|| JevError::MissingMetricAnswer(applicability_id.clone()))?;
+                results.insert(applicability_id.clone(), parse_binary(answer_val, &applicability_id)?);
+            }
+        }
+
+        Ok(JevEvaluationResult { metrics: results, usage })
+    }
+
+    /// Asks plain yes/no questions, given as (id, instructions), over `state`.
+    pub async fn ask_nouls(
+        &self,
+        state: &Value,
+        questions: &[(String, String)],
+    ) -> Result<JevEvaluationResult, JevError> {
+        let request_body = JevRequest {
+            model: "jev-latest",
+            state,
+            questions: questions
+                .iter()
+                .map(|(id, instructions)| {
+                    let question = JevQuestion { question_type: "noul", instructions: instructions.clone(), criteria: None };
+                    (id.clone(), question)
+                })
+                .collect(),
+        };
+        let response_json = self.send(&request_body).await?;
+
+        let mut results = HashMap::new();
+        for (id, _) in questions {
+            let answer = extract_metric_answer(&response_json, id)
+                .ok_or_else(|| JevError::MissingMetricAnswer(id.clone()))?;
+            results.insert(id.clone(), parse_binary(answer, id)?);
+        }
+        Ok(JevEvaluationResult { metrics: results, usage: response_usage(&response_json) })
+    }
+
+    async fn send(&self, request_body: &JevRequest<'_>) -> Result<Value, JevError> {
         let mut headers = HeaderMap::new();
         let auth_val = format!("Bearer {}", self.api_key.trim());
         let mut header_value = HeaderValue::from_str(&auth_val)
@@ -84,7 +134,7 @@ impl JevClient {
             .client
             .post(&self.endpoint_url)
             .headers(headers)
-            .json(&request_body)
+            .json(request_body)
             .send()
             .await?;
 
@@ -103,42 +153,22 @@ impl JevClient {
             });
         }
 
-        let response_json: Value = response.json().await.map_err(|e| {
-            JevError::InvalidResponse(format!("Failed to parse response JSON: {e}"))
-        })?;
-
-        let (input_tokens, output_tokens) = if let Some(usage) = response_json.get("usage") {
-            let in_tok = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let out_tok = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            (in_tok, out_tok)
-        } else {
-            (0, 0)
-        };
-
-        let mut results = HashMap::new();
-        for metric in metrics {
-            let answer_val = extract_metric_answer(&response_json, &metric.id)
-                .ok_or_else(|| JevError::MissingMetricAnswer(metric.id.clone()))?;
-
-            let metric_res = parse_answer(answer_val, metric)?;
-            results.insert(metric.id.clone(), metric_res);
-
-            if metric.applies_when.is_some() {
-                let applicability_id = metric.applicability_id();
-                let answer_val = extract_metric_answer(&response_json, &applicability_id)
-                    .ok_or_else(|| JevError::MissingMetricAnswer(applicability_id.clone()))?;
-                results.insert(applicability_id.clone(), parse_binary(answer_val, &applicability_id)?);
-            }
-        }
-
-        Ok(JevEvaluationResult {
-            metrics: results,
-            usage: JevUsage {
-                input_tokens,
-                output_tokens,
-            },
-        })
+        response
+            .json()
+            .await
+            .map_err(|e| JevError::InvalidResponse(format!("Failed to parse response JSON: {e}")))
     }
+}
+
+fn response_usage(response_json: &Value) -> JevUsage {
+    let tokens = |field: &str| {
+        response_json
+            .get("usage")
+            .and_then(|usage| usage.get(field))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
+    JevUsage { input_tokens: tokens("input_tokens"), output_tokens: tokens("output_tokens") }
 }
 
 /// One question per metric, plus a yes/no question for each metric's `applies_when`. They all

@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod explain;
 pub mod git;
 pub mod jev_client;
 pub mod output;

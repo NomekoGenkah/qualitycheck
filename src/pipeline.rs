@@ -8,13 +8,18 @@ use tokio::sync::Semaphore;
 
 use crate::cache::{
     compute_cache_key, get_cached_result, put_cached_result, upgrade_cached_result,
-    CachedFileResult, CACHE_FORMAT_VERSION,
+    CachedFileResult, CachedMetricResult, JevUsage, CACHE_FORMAT_VERSION,
+};
+use crate::explain::{
+    explain_questions, explain_state, question_id, split_regions, Evidence, ExplainTarget, Region,
 };
 use crate::error::{QualityCheckError, ScanError};
 use crate::context::RelatedFile;
 use crate::jev_client::{JevClient, CONTEXT_PREAMBLE};
 use crate::profile::{compute_active_metrics_hash, Metric, Profile, Rubric};
-use crate::scorer::{evaluate_file_with_metrics, FileEvaluation, ScanRunResult, SCORING_VERSION};
+use crate::scorer::{
+    evaluate_file_with_metrics, FileEvaluation, ProfileEvaluation, ScanRunResult, SCORING_VERSION,
+};
 
 /// A file to evaluate. `content`, when set, is evaluated instead of reading `path` — e.g. a
 /// file as it was at a base revision, reported under its current path.
@@ -80,7 +85,7 @@ pub async fn run_scan_pipeline(
     project_root: &Path,
 ) -> Result<ScanRunResult, QualityCheckError> {
     let inputs = file_paths.iter().cloned().map(ScanInput::from_disk).collect();
-    run_scan_pipeline_on_inputs(target_path, inputs, profiles, client, concurrency, project_root)
+    run_scan_pipeline_on_inputs(target_path, inputs, profiles, client, concurrency, project_root, false)
         .await
 }
 
@@ -91,36 +96,30 @@ pub async fn run_scan_pipeline_on_inputs(
     client: Arc<JevClient>,
     concurrency: usize,
     project_root: &Path,
+    explain: bool,
 ) -> Result<ScanRunResult, QualityCheckError> {
     let run_id = Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string();
     let timestamp = Utc::now();
-    let metrics_hash = compute_active_metrics_hash(profiles);
-    let all_metrics = collect_unique_metrics(profiles);
+    let settings = Arc::new(RunSettings {
+        target_root: target_path.to_path_buf(),
+        project_root: project_root.to_path_buf(),
+        metrics_hash: compute_active_metrics_hash(profiles),
+        metrics: collect_unique_metrics(profiles),
+        profiles: profiles.to_vec(),
+        client,
+        explain,
+    });
 
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut tasks = Vec::with_capacity(inputs.len());
 
     for input in inputs {
-        let target_root = target_path.to_path_buf();
-        let p_root = project_root.to_path_buf();
-        let m_hash = metrics_hash.clone();
-        let metrics = all_metrics.clone();
-        let profs = profiles.to_vec();
-        let client_clone = Arc::clone(&client);
+        let settings = Arc::clone(&settings);
         let sem = Arc::clone(&semaphore);
 
         tasks.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            evaluate_single_file(
-                input,
-                &target_root,
-                &p_root,
-                &m_hash,
-                &metrics,
-                &profs,
-                &client_clone,
-            )
-            .await
+            evaluate_single_file(input, &settings).await
         }));
     }
 
@@ -135,6 +134,10 @@ pub async fn run_scan_pipeline_on_inputs(
                 if eval.served_from_cache {
                     cached_count += 1;
                 } else if let Some(u) = &eval.usage {
+                    run_input_tokens += u.input_tokens;
+                    run_output_tokens += u.output_tokens;
+                }
+                if let Some(u) = &eval.explain_usage {
                     run_input_tokens += u.input_tokens;
                     run_output_tokens += u.output_tokens;
                 }
@@ -193,15 +196,23 @@ fn collect_unique_metrics(profiles: &[Profile]) -> Vec<Metric> {
     map.into_values().collect()
 }
 
+/// What every file of a run is evaluated with.
+struct RunSettings {
+    target_root: PathBuf,
+    project_root: PathBuf,
+    metrics_hash: String,
+    /// Every metric of `profiles`, once each.
+    metrics: Vec<Metric>,
+    profiles: Vec<Profile>,
+    client: Arc<JevClient>,
+    explain: bool,
+}
+
 async fn evaluate_single_file(
     input: ScanInput,
-    target_root: &Path,
-    project_root: &Path,
-    metrics_hash: &str,
-    metrics: &[Metric],
-    profiles: &[Profile],
-    client: &JevClient,
+    settings: &RunSettings,
 ) -> Result<FileEvaluation, QualityCheckError> {
+    let RunSettings { target_root, project_root, metrics_hash, metrics, profiles, client, explain } = settings;
     let ScanInput { path, content, related } = input;
     let path = path.as_path();
     let file_bytes = read_input_bytes(path, content)?;
@@ -231,8 +242,13 @@ async fn evaluate_single_file(
         (eval_res.metrics, false, Some(usage))
     };
 
-    let profile_evals = evaluate_file_with_metrics(profiles, &metric_results);
+    let mut profile_evals = evaluate_file_with_metrics(profiles, &metric_results);
     let relative_path = compute_relative_display_path(path, target_root);
+    let explain_usage = if *explain {
+        explain_failing_metrics(&mut profile_evals, metrics, &file_bytes, &relative_path, project_root, client).await
+    } else {
+        None
+    };
 
     Ok(FileEvaluation {
         path: path.to_path_buf(),
@@ -240,8 +256,105 @@ async fn evaluate_single_file(
         served_from_cache,
         usage,
         context_files: related.into_iter().map(|r| r.path).collect(),
+        explain_usage,
         profiles: profile_evals,
     })
+}
+
+/// `--explain`: for each metric that counts (`MetricEvaluation::counts`) and scores below its profile's `fail_below`, asks Jev
+/// which regions of the file are responsible for its finding, in one request per file, and
+/// attaches the answer as `evidence`. Answers are cached per file content and finding. A failed
+/// request only loses the evidence: it is reported on stderr and never fails the scan. Returns
+/// the tokens spent, if a request was made.
+async fn explain_failing_metrics(
+    profile_evals: &mut [ProfileEvaluation],
+    metrics: &[Metric],
+    file_bytes: &[u8],
+    relative_path: &str,
+    project_root: &Path,
+    client: &JevClient,
+) -> Option<JevUsage> {
+    let text = String::from_utf8_lossy(file_bytes);
+    let regions = split_regions(&text);
+    if regions.len() < 2 {
+        return None;
+    }
+
+    let mut targets: Vec<ExplainTarget> = Vec::new();
+    for profile in profile_evals.iter() {
+        for evaluation in &profile.metrics {
+            let already = targets.iter().any(|t| t.metric_id == evaluation.metric_id);
+            if evaluation.counts() && evaluation.normalized_score < profile.fail_below && !already
+                && let Some(metric) = metrics.iter().find(|m| m.id == evaluation.metric_id)
+            {
+                targets.push(ExplainTarget::new(metric, evaluation));
+            }
+        }
+    }
+
+    let mut evidence: HashMap<String, Evidence> = HashMap::new();
+    let mut unanswered = Vec::new();
+    for target in targets {
+        let (cache_key, file_hash) = compute_cache_key(file_bytes, &target.scope());
+        let cached = get_cached_result(project_root, &cache_key)
+            .and_then(|cached| evidence_from(&cached.metrics, &target.metric_id, &regions));
+        match cached {
+            Some(found) => {
+                evidence.insert(target.metric_id.clone(), found);
+            }
+            None => unanswered.push((target, cache_key, file_hash)),
+        }
+    }
+
+    let mut usage = None;
+    if !unanswered.is_empty() {
+        let asked: Vec<ExplainTarget> = unanswered.iter().map(|(target, _, _)| target.clone()).collect();
+        let state = explain_state(relative_path, &text, &regions, &asked);
+        match client.ask_nouls(&state, &explain_questions(&regions, &asked)).await {
+            Ok(result) => {
+                for (target, cache_key, file_hash) in unanswered {
+                    let answers: HashMap<String, CachedMetricResult> = (0..regions.len())
+                        .map(|index| question_id(&target.metric_id, index))
+                        .filter_map(|id| Some((id.clone(), result.metrics.get(&id)?.clone())))
+                        .collect();
+                    let entry = CachedFileResult {
+                        format_version: CACHE_FORMAT_VERSION,
+                        file_hash,
+                        metrics_hash: target.scope(),
+                        timestamp: Utc::now(),
+                        metrics: answers,
+                        usage: None,
+                    };
+                    let _ = put_cached_result(project_root, &cache_key, &entry);
+                    if let Some(found) = evidence_from(&entry.metrics, &target.metric_id, &regions) {
+                        evidence.insert(target.metric_id, found);
+                    }
+                }
+                usage = Some(result.usage);
+            }
+            Err(err) => eprintln!("Could not locate findings in {relative_path}: {err}"),
+        }
+    }
+
+    for evaluation in profile_evals.iter_mut().flat_map(|p| p.metrics.iter_mut()) {
+        evaluation.evidence = evidence.get(&evaluation.metric_id).cloned();
+    }
+    usage
+}
+
+/// Evidence from cached answers, or `None` unless every region was answered.
+fn evidence_from(
+    answers: &HashMap<String, CachedMetricResult>,
+    metric_id: &str,
+    regions: &[Region],
+) -> Option<Evidence> {
+    let probabilities = (0..regions.len())
+        .map(|index| {
+            let answer = answers.get(&question_id(metric_id, index))?;
+            answer.probabilities.as_ref()?.get("true").copied()
+        })
+        .collect::<Option<Vec<f64>>>()?;
+    Some(Evidence::from_answers(regions, &probabilities))
 }
 
 fn compute_relative_display_path(path: &Path, target_root: &Path) -> String {

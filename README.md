@@ -18,6 +18,7 @@ Designed to be run by humans directly, in CI pipelines, or invoked by AI coding 
 - **Offline Token & Cost Estimation (`--preview`)**: Pre-calculate token usage and estimated cost before making any API calls. Fully offline, 0 network requests, and aware of cached files.
 - **Token & Cost Tracking**: Live runs report exact input/output tokens and cost ($0.042 / 1M input tokens), reporting $0.00 for cache hits.
 - **Git-Aware Scans (`patch`)**: Scores files modified versus the working tree or a base branch, and with `--delta` / `--fail-on-regression` scores the base version too, so only regressions introduced by the change fail the gate.
+- **Finding Locations (`--explain`)**: Asks Jev which regions of a file are responsible for each failing metric and reports them as line ranges.
 - **Cross-File Context (`--context`)**: Sends related files (tests, referenced and referencing files) alongside each file, so delegated work isn't scored as missing.
 - **Agent-Ready**: Self-describing (`qualitycheck describe`), TTY-aware auto-disabling colors, clean JSON stdout (with logs/progress directed to stderr), and standard exit codes.
 - **History & Triage**: Automatic persistence to `.qualitycheck/runs/` enables offline inspection with `gaps`, `file`, and `diff`.
@@ -156,7 +157,35 @@ characters per file. Expect roughly 2–3× the input tokens for files that get 
 the base side is shown the base versions of related files. Answers with and without context are
 cached separately.
 
-### 5. Triage & History
+### 5. Locating Findings (`--explain`)
+
+A low score says what kind of problem was found (see `matched_rubric` below), not where. With
+`--explain` (on `scan` and `patch`), each file with a metric that counts and scores below its
+profile's `fail_below` gets one more request: the file is split into regions of about 40 lines,
+cutting between top-level items or members where it can, and Jev is asked of each region whether it
+is one of the places responsible for the finding. Regions that stand out are reported:
+
+```
+  [security] injection_risk: medium (18% conf.) [counts 64%: applies 65% · below 20% min conf.]
+      ↳ Some interpreted strings are assembled by concatenating or formatting external data with partial or inconsistent escaping.
+        at L125-161 (91%)
+```
+
+A region stands out when Jev judges it responsible with probability 0.5 or more and at least 0.25
+above the file's median region (up to three are listed). A problem judged moderately everywhere,
+like testability of a file that talks to a database throughout, is reported as `no single region
+stands out`, which means it concerns the file as a whole. Both rules were calibrated on a handful
+of files. The JSON carries every region's probability under `evidence.regions` and the standouts
+under `evidence.hotspots`.
+
+Region splitting is done in Rust, so Jev only ever judges regions and never makes up line numbers.
+A request costs about as many input tokens as scoring the file, and answers are cached per file
+content and finding, so re-runs are free until the file or its finding changes. `--preview` doesn't
+include it: which metrics fail is only known after scoring. If an explain request fails, the scores
+are still reported, with a notice on stderr. With `patch --delta`, only the working-tree side is
+explained.
+
+### 6. Triage & History
 
 ```bash
 # Gaps triage: view files/metrics that failed their threshold in the latest run
@@ -172,7 +201,7 @@ qualitycheck diff <run-id-1> <run-id-2>
 qualitycheck runs list
 ```
 
-### 6. Profiles & Agent Introspection
+### 7. Profiles & Agent Introspection
 
 ```bash
 # List available profiles (built-in and ~/.config/qualitycheck/profiles/)
@@ -295,6 +324,7 @@ qualitycheck/
 │   ├── walker.rs      # Directory walking: .gitignore, source-code filter, globs, size limits
 │   ├── git.rs         # Changed files and their base-revision content for patch
 │   ├── context.rs     # Deterministic related-file selection for --context
+│   ├── explain.rs     # Region splitting and hotspot selection for --explain
 │   ├── cache.rs       # Blake3 content-addressed cache (.qualitycheck/cache/)
 │   ├── jev_client.rs  # Async batch client for TypeSafe AI Jev API
 │   ├── pipeline.rs    # Concurrent scan orchestration & offline preview estimation

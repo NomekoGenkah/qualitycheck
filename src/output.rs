@@ -108,7 +108,7 @@ pub fn print_scan_result(
                         );
 
                         let colored_line = if colors_enabled {
-                            if metric.excluded_low_confidence || metric.not_applicable {
+                            if !metric.counts() {
                                 colorize(&metric_line, "90")
                             } else if metric.normalized_score >= 4.0 {
                                 colorize(&metric_line, "32")
@@ -122,7 +122,7 @@ pub fn print_scan_result(
                         };
 
                         println!("{}", colored_line);
-                        if counts_toward_score(metric) && metric.normalized_score < profile.fail_below {
+                        if metric.counts() && metric.normalized_score < profile.fail_below {
                             print_matched_rubric(metric, "      ", colors_enabled);
                         }
                     }
@@ -154,7 +154,8 @@ pub fn print_scan_result(
                 println!();
             }
 
-            let token_line = if result.cached_files == result.total_files && result.total_files > 0 {
+            let nothing_spent = result.usage.input_tokens == 0 && result.usage.output_tokens == 0;
+            let token_line = if result.cached_files == result.total_files && result.total_files > 0 && nothing_spent {
                 format!(
                     "Tokens consumed: 0 (all {} files served from cache) · Run cost: $0.00000",
                     result.total_files
@@ -220,7 +221,7 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                     );
 
                     let colored_line = if colors_enabled {
-                        if metric.excluded_low_confidence || metric.not_applicable {
+                        if !metric.counts() {
                             colorize(&line, "90")
                         } else if metric.normalized_score >= 4.0 {
                             colorize(&line, "32")
@@ -233,7 +234,7 @@ pub fn print_file_evaluation(file: &FileEvaluation, format: OutputFormat, no_col
                         line
                     };
                     println!("{}", colored_line);
-                    if counts_toward_score(metric) {
+                    if metric.counts() {
                         print_matched_rubric(metric, "      ", colors_enabled);
                     }
                 }
@@ -277,11 +278,7 @@ pub fn filter_gaps(run: &ScanRunResult) -> ScanRunResult {
                 let failing_metrics: Vec<MetricEvaluation> = profile
                     .metrics
                     .iter()
-                    .filter(|m| {
-                        !m.excluded_low_confidence
-                            && !m.not_applicable
-                            && m.normalized_score < profile.fail_below
-                    })
+                    .filter(|m| m.counts() && m.normalized_score < profile.fail_below)
                     .cloned()
                     .collect();
 
@@ -686,17 +683,27 @@ fn format_distribution(metric: &MetricEvaluation) -> String {
     format!(" [{}]", parts.join(" · "))
 }
 
-fn counts_toward_score(metric: &MetricEvaluation) -> bool {
-    !metric.excluded_low_confidence && !metric.not_applicable
-}
-
-/// What the answer means, in the profile's own words, under the metric's line.
+/// What the answer means, in the profile's own words, under the metric's line, followed with
+/// `--explain` by where in the file it was found.
 fn print_matched_rubric(metric: &MetricEvaluation, indent: &str, colors_enabled: bool) {
-    let Some(rubric) = &metric.matched_rubric else {
+    let dim = |line: String| if colors_enabled { colorize(&line, "90") } else { line };
+    if let Some(rubric) = &metric.matched_rubric {
+        println!("{}", dim(format!("{indent}↳ {rubric}")));
+    }
+    let Some(evidence) = &metric.evidence else {
         return;
     };
-    let line = format!("{indent}↳ {rubric}");
-    println!("{}", if colors_enabled { colorize(&line, "90") } else { line });
+    let location = if evidence.hotspots.is_empty() {
+        "no single region stands out".to_string()
+    } else {
+        let spots: Vec<String> = evidence
+            .hotspots
+            .iter()
+            .map(|r| format!("L{}-{} ({}%)", r.start_line, r.end_line, (r.probability * 100.0).round() as u64))
+            .collect();
+        format!("at {}", spots.join(", "))
+    };
+    println!("{}", dim(format!("{indent}  {location}")));
 }
 
 /// Why a metric carries less than its full weight, e.g. ` [counts 38%: applies 44%]` or

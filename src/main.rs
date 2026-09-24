@@ -225,6 +225,7 @@ async fn handle_scan(args: ScanArgs) -> Result<i32, QualityCheckError> {
         client,
         args.concurrency,
         &project_root,
+        args.explain,
     )
     .await?;
 
@@ -380,6 +381,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         Arc::clone(&client),
         args.concurrency,
         &project_root,
+        args.explain,
     )
     .await?;
 
@@ -406,6 +408,7 @@ async fn handle_patch(args: PatchArgs) -> Result<i32, QualityCheckError> {
         client,
         args.concurrency,
         &project_root,
+        false,
     )
     .await?;
 

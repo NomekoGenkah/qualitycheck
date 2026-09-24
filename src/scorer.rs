@@ -28,6 +28,10 @@ pub struct MetricEvaluation {
     /// means. Absent for metrics without a rubric and in runs saved before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_rubric: Option<String>,
+    /// With `--explain`, for metrics that count and score below `fail_below`: the regions of the
+    /// file Jev judged responsible for `matched_rubric`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<crate::explain::Evidence>,
     /// Jev's probability that the metric's `applies_when` condition holds for this file.
     /// Absent for metrics without a condition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,13 +42,25 @@ pub struct MetricEvaluation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inclusion: Option<f64>,
     /// Confidence fell below the profile's `min_confidence`, so the metric counts only partly,
-    /// or not at all, and is not reported as a gap.
+    /// or not at all (see `inclusion`).
     #[serde(default)]
     pub excluded_low_confidence: bool,
     /// The metric's `applies_when` condition is more likely false than true for this file, so
-    /// the metric counts only partly, or not at all, and is not reported as a gap.
+    /// the metric counts only partly, or not at all (see `inclusion`).
     #[serde(default)]
     pub not_applicable: bool,
+}
+
+impl MetricEvaluation {
+    /// Whether the metric carries at least half its weight in the composite, and so is treated
+    /// as a judgment of this file: reported as a gap and located by `--explain` when it scores
+    /// low. Runs scored before `inclusion` was recorded use the flags instead.
+    pub fn counts(&self) -> bool {
+        match self.inclusion {
+            Some(inclusion) => inclusion >= 0.5,
+            None => !self.excluded_low_confidence && !self.not_applicable,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +97,10 @@ pub struct FileEvaluation {
     /// Repository-relative paths of the related files shown to Jev with this file (`--context`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_files: Vec<String>,
+    /// Tokens spent locating findings with `--explain`, which can be spent even when the scores
+    /// were served from cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_usage: Option<crate::cache::JevUsage>,
     pub profiles: Vec<ProfileEvaluation>,
 }
 
@@ -258,6 +278,7 @@ pub fn evaluate_file_with_metrics(
                     probabilities: cached.probabilities.clone(),
                     range: metric.range,
                     matched_rubric: metric.rubric_for(&cached.value).map(str::to_string),
+                    evidence: None,
                     applicability,
                     inclusion: Some(inclusion),
                     excluded_low_confidence,

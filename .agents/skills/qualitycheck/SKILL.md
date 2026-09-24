@@ -91,6 +91,14 @@ qualitycheck gaps --format json
 qualitycheck gaps --run <run-id> --format json
 ```
 
+To find where a low score comes from, re-run with `--explain` instead of reading the whole file:
+each failing metric gets `evidence.hotspots` (line ranges Jev judged responsible, with
+probabilities). An empty `hotspots` list means the finding concerns the file as a whole. It costs
+about one more scoring's worth of tokens per failing file, and is cached.
+```bash
+qualitycheck scan src/auth.rs --explain --format json
+```
+
 ### 5. Verify Refactoring Improvements
 For uncommitted or branch changes, `qualitycheck patch --delta --format json` compares every
 changed file against its base version in one run. To compare arbitrary points in time instead:
@@ -115,8 +123,8 @@ changed file against its base version in one run. To compare arbitrary points in
 
 | Command | Purpose | Key Flags |
 |---|---|---|
-| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
-| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json>` |
+| `qualitycheck scan [PATH]...` | Scan one or more files or directories | `--explain`, `--context`, `--all-files`, `--profile <name>`, `--format <table\|json>`, `--preview`, `--strict`, `--no-ignore` |
+| `qualitycheck patch` | Scan git-changed files | `--base <branch>`, `--delta`, `--fail-on-regression <POINTS>`, `--fail-on-metric-regression <POINTS>`, `--explain`, `--context`, `--all-files`, `--preview`, `--strict`, `--format <table\|json>` |
 | `qualitycheck gaps` | Filter latest or specified run for failing metrics | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck file <PATH>` | Detailed metric breakdown for a single file | `--run <run-id>`, `--format <table\|json>` |
 | `qualitycheck diff <RUN-A> <RUN-B>` | Compare two historical runs for score deltas | `--format <table\|json>` |
@@ -150,12 +158,12 @@ qualitycheck scan src/ --profile quality,security --format json
 `normalized_score` is the probability-weighted score; `raw_value` is only Jev's top pick, and for
 enum metrics `probabilities` shows how close the alternatives were. Judge by `normalized_score`.
 `matched_rubric` is the profile's description of the situation Jev's answer corresponds to (the
-nearest level for scale metrics): it names the kind of problem, not its location, so read the file
-to find where it occurs.
+nearest level for scale metrics): it names the kind of problem, not its location; use `--explain`
+to locate it.
 
 Metrics flagged `"not_applicable": true` (the metric's `applies_when` condition likely doesn't hold
 for the file, e.g. input validation in a file that receives no external input) or
-`"excluded_low_confidence": true` (answered below the profile's `min_confidence`) count little or
-nothing toward `composite_score`; don't treat them as findings. `inclusion` (0–1) is the share of its
-weight each metric carried. A profile with `"inconclusive": true` had every metric flagged and was
-not judged.
+`"excluded_low_confidence": true` (answered below the profile's `min_confidence`) count partly or not
+at all toward `composite_score`. `inclusion` (0–1) is the share of its weight each metric carried:
+treat metrics below 0.5 as not judged, not as findings (`gaps` and `--explain` skip them). A profile
+with `"inconclusive": true` had every metric flagged and was not judged.

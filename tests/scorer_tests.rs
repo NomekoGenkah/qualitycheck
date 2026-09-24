@@ -357,6 +357,7 @@ fn run_of(files: &[(&str, f64, bool)]) -> ScanRunResult {
                 served_from_cache: false,
                 usage: None,
                 context_files: Vec::new(),
+                explain_usage: None,
                 profiles: vec![ProfileEvaluation {
                     profile_name: "quality".to_string(),
                     composite_score: *composite,
@@ -641,4 +642,17 @@ fn test_find_metric_regressions_weighs_drops_by_how_much_the_metric_counts() {
         .map(|r| r.relative_path)
         .collect();
     assert!(strict.iter().any(|p| p == "barely_counted.rs") && strict.iter().any(|p| p == "small_drop.rs"));
+}
+
+#[test]
+fn test_metric_counts_by_its_weight_share_not_its_flags() {
+    // Just under min_confidence: flagged, but still carrying 90% of its weight (as observed on a
+    // TS service's injection_risk at 18% confidence), so it is a judgment of the file.
+    let evals = evaluate_file_with_metrics(&[gating_profile(None)], &answers((4.0, 0.9), (1.0, 0.18)));
+    let cohesion = evals[0].metrics.iter().find(|m| m.metric_id == "cohesion").unwrap();
+    assert!(cohesion.excluded_low_confidence);
+    assert!(cohesion.counts());
+
+    let evals = evaluate_file_with_metrics(&[gating_profile(None)], &answers((4.0, 0.9), (1.0, 0.12)));
+    assert!(!evals[0].metrics[1].counts());
 }

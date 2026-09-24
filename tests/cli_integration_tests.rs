@@ -1049,6 +1049,119 @@ fn test_cli_patch_fail_on_metric_regression_catches_what_the_composite_averages_
         .stdout(predicate::str::contains("controller.rs [quality] cohesion: 5.0 -> 3.0 (weighted drop 2.0)"));
 }
 
+/// Scores cohesion at the lowest level and locates it in the second region of the file; any
+/// other quality answer is good.
+fn cohesion_located_in_second_region(body: &serde_json::Value) -> serde_json::Value {
+    let questions = body["questions"].as_object().unwrap();
+    if questions.contains_key("cohesion#0") {
+        let answers: serde_json::Map<String, serde_json::Value> = questions
+            .keys()
+            .map(|id| (id.clone(), serde_json::json!({ "noul": if id == "cohesion#1" { 0.9 } else { 0.1 } })))
+            .collect();
+        return serde_json::json!({ "answers": answers, "usage": { "input_tokens": 700, "output_tokens": 30 } });
+    }
+    serde_json::json!({ "answers": {
+        "naming_clarity": { "score": 4.0, "confidence": 0.9 },
+        "naming_clarity:applies": { "noul": 0.97 },
+        "has_dead_code": { "noul": 0.02 },
+        "complexity_level": { "choice": "low", "confidence": 0.95 },
+        "cohesion": { "score": 0.0, "confidence": 0.9 },
+        "cohesion:applies": { "noul": 0.97 }
+    }, "usage": { "input_tokens": 500, "output_tokens": 20 } })
+}
+
+/// Answers scoring requests like `cohesion_located_in_second_region`, and explain requests
+/// with nothing usable.
+fn explain_request_fails(body: &serde_json::Value) -> serde_json::Value {
+    if body["questions"].as_object().unwrap().contains_key("cohesion#0") {
+        return serde_json::json!({ "answers": {} });
+    }
+    cohesion_located_in_second_region(body)
+}
+
+/// 30 three-line functions separated by blank lines: long enough to split into regions.
+fn many_functions() -> String {
+    (0..30).map(|i| format!("fn f{i}() {{\n    step();\n}}\n")).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn test_cli_scan_explain_locates_failing_metrics() {
+    let url = spawn_content_aware_mock_jev(cohesion_located_in_second_region);
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("lib.rs"), many_functions()).unwrap();
+    let config = tempdir().unwrap();
+    let scan = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("qualitycheck").unwrap();
+        cmd.current_dir(tmp.path())
+            .env("QUALITYCHECK_CONFIG_DIR", config.path())
+            .env("JEV_API_KEY", "test_key")
+            .env("JEV_API_URL", &url)
+            .args(["scan", ".", "--explain"])
+            .args(args);
+        cmd.assert()
+    };
+    let json = |assert: assert_cmd::assert::Assert| -> serde_json::Value {
+        serde_json::from_slice(&assert.get_output().stdout).unwrap()
+    };
+    let metric = |run: &serde_json::Value, id: &str| {
+        run["files"][0]["profiles"][0]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["metric_id"] == id)
+            .unwrap()
+            .clone()
+    };
+
+    let run = json(scan(&["--format", "json"]).success());
+    let cohesion = metric(&run, "cohesion");
+    let hotspots = cohesion["evidence"]["hotspots"].as_array().unwrap();
+    assert_eq!(hotspots.len(), 1);
+    assert_eq!(hotspots[0]["probability"], 0.9);
+    let regions = cohesion["evidence"]["regions"].as_array().unwrap();
+    assert!(regions.len() >= 2);
+    assert_eq!(hotspots[0]["start_line"], regions[1]["start_line"]);
+    // Only metrics below the threshold are located.
+    assert!(metric(&run, "naming_clarity").get("evidence").is_none());
+    assert_eq!(run["files"][0]["explain_usage"]["input_tokens"], 700);
+    assert_eq!(run["usage"]["input_tokens"], 1200);
+
+    // Scores and evidence both come from the cache the second time.
+    let cached = json(scan(&["--format", "json"]).success());
+    assert_eq!(metric(&cached, "cohesion")["evidence"], cohesion["evidence"]);
+    assert!(cached["files"][0].get("explain_usage").is_none());
+    assert_eq!(cached["usage"]["input_tokens"], 0);
+
+    let start = hotspots[0]["start_line"].as_u64().unwrap();
+    let end = hotspots[0]["end_line"].as_u64().unwrap();
+    scan(&["--no-color"])
+        .success()
+        .stdout(predicate::str::contains(format!("        at L{start}-{end} (90%)")));
+}
+
+#[test]
+fn test_cli_scan_explain_failure_keeps_the_scores() {
+    let url = spawn_content_aware_mock_jev(explain_request_fails);
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("lib.rs"), many_functions()).unwrap();
+    let config = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("qualitycheck")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("QUALITYCHECK_CONFIG_DIR", config.path())
+        .env("JEV_API_KEY", "test_key")
+        .env("JEV_API_URL", &url)
+        .args(["scan", ".", "--explain", "--format", "json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Could not locate findings in lib.rs"));
+    let run: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let metrics = run["files"][0]["profiles"][0]["metrics"].as_array().unwrap();
+    assert!(metrics.iter().all(|m| m.get("evidence").is_none()));
+    assert!(run["files"][0]["profiles"][0]["composite_score"].is_number());
+}
+
 #[test]
 fn test_cli_patch_delta_preview_counts_both_sides_offline() {
     let (tmp, _repo) = repo_with_quality_history();
